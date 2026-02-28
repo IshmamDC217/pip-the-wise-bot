@@ -1,0 +1,46 @@
+-- ForgeRealm Discord Bot — Local Database Setup
+-- Run: mysql -u root < scripts/setup-db.sql
+
+CREATE DATABASE IF NOT EXISTS forgerealm;
+USE forgerealm;
+
+CREATE TABLE IF NOT EXISTS users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  username VARCHAR(64) NOT NULL UNIQUE,
+  email VARCHAR(255) NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  salt VARCHAR(255) NOT NULL DEFAULT '',
+  role VARCHAR(32) NOT NULL DEFAULT 'user',
+  email_verified TINYINT(1) NOT NULL DEFAULT 0,
+  email_verification_token_hash VARCHAR(255) NULL,
+  email_verification_sent_at DATETIME NULL,
+  email_verified_at DATETIME NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS products (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  description LONGTEXT,
+  price DECIMAL(10, 2) NOT NULL,
+  stock INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS product_images (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  product_id INT NOT NULL,
+  path VARCHAR(255) NOT NULL,
+  is_primary TINYINT(1) NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS admin_users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  username VARCHAR(64) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  salt VARCHAR(255) NOT NULL,
+  role VARCHAR(32) NOT NULL DEFAULT 'admin',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

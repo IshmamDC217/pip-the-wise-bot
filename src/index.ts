@@ -6,9 +6,14 @@ import { loadCommands } from './commands/index.js';
 // Import events
 import * as ready from './events/ready.js';
 import * as interactionCreate from './events/interactionCreate.js';
+import * as messageCreate from './events/messageCreate.js';
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
 // Register events
@@ -19,6 +24,7 @@ if (ready.once) {
 }
 
 client.on(interactionCreate.name, (...args) => interactionCreate.execute(...(args as [any])));
+client.on(messageCreate.name, (...args) => messageCreate.execute(...(args as [any])));
 
 // Graceful shutdown
 process.on('SIGINT', () => {

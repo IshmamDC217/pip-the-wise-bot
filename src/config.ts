@@ -27,9 +27,13 @@ export const config = {
 
   // MySQL
   DB_HOST: optional('DB_HOST', 'localhost'),
+  DB_PORT: parseInt(optional('DB_PORT', '3306')),
   DB_USER: optional('DB_USER', 'root'),
   DB_PASS: optional('DB_PASS', ''),
   DB_NAME: optional('DB_NAME', 'forgerealm'),
+
+  // Groq AI
+  GROQ_API_KEY: required('GROQ_API_KEY'),
 
   // Polling intervals
   POLL_DATABASE_MS: parseInt(optional('POLL_DATABASE_MS', '60000')),

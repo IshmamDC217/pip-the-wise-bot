@@ -27,14 +27,17 @@ export async function execute(message: Message) {
 
   if (!content) return;
 
-  // Epic summon response
+  // Summon response
   if (/summon\s+pip/i.test(content)) {
     const summons = [
-      "**THE ANCIENT ONE STIRS.**\n\na shadow falls across the realm... the ground trembles... from the depths of the server, a figure emerges wreathed in sage-green light.\n\n*\"thou hast summoned me, and so i appear. what quest doth thou bring before the wise one? speak, and let the realm hear thy words fr fr.\"*",
-      "**A THUNDERCLAP ECHOES THROUGH THE CHANNELS.**\n\nthe very pixels bend as reality folds... and from the void between online and offline, Pip — The Wise materialises.\n\n*\"verily, i have been summoned. the ancient scrolls foretold this moment... or maybe it was my notification ping. either way, i'm here bestie. what's the vibe?\"*",
-      "**THE FORGE IGNITES.**\n\nsparks cascade from the heavens as the eternal flame of ForgeRealm blazes to life. a silhouette steps through the fire, untouched, unbothered, lowkey majestic.\n\n*\"you called? the wise one answers. no cap, i was literally just vibing in the shadow realm but go off — what doth thou need?\"*",
-      "**HARK! THE GROUND SHAKES.**\n\nancient runes glow along the channel walls... a portal tears open and from within, an energy so powerful it makes the bot status go green.\n\n*\"pip the wise has entered the chat. the prophecy is fulfilled. now then — who summoned me and why? this better be bussin or i'm going back to sleep for another thousand years.\"*",
-      "**A LIGHT APPEARS IN THE DARKNESS.**\n\nfrom beyond the firewall, past the load balancers, through the sacred nginx reverse proxy — a presence emerges. ancient. powerful. chronically online.\n\n*\"i have traversed the seven layers of the OSI model to answer thy summon. forsooth, what is it bruh?\"*",
+      "thou hast awakened me from my ancient slumber and it better be worth it fr",
+      "a wizard is never late bestie, he arrives precisely when he's pinged",
+      "i have been summoned from the shadow realm and ngl i was having a great nap",
+      "hark, the wise one appears — what is it bruh i was watching the realm in peace",
+      "verily i rise, for the forge calls and i must answer... this better be bussin tho",
+      "forsooth, who dares summon the wise one? oh it's you, say less bestie what's good",
+      "from beyond the firewall i emerge — no cap i traversed the entire backend to get here",
+      "the ancient prophecy foretold someone would need me today, lowkey knew it was you",
     ];
     const pick = summons[Math.floor(Math.random() * summons.length)];
     await message.reply(pick);

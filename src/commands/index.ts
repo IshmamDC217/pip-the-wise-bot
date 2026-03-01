@@ -11,8 +11,9 @@ import * as stats from './stats.js';
 import * as products from './products.js';
 import * as users from './users.js';
 import * as site from './site.js';
+import * as calendar from './calendar.js';
 
-const commandModules: Command[] = [ping, status, stats, products, users, site];
+const commandModules: Command[] = [ping, status, stats, products, users, site, calendar];
 
 export async function loadCommands(client: Client) {
   const commands = new Collection<string, Command>();

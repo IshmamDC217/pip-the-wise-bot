@@ -35,6 +35,10 @@ export const config = {
   // Groq AI
   GROQ_API_KEY: required('GROQ_API_KEY'),
 
+  // Google Calendar
+  GOOGLE_SERVICE_ACCOUNT: optional('GOOGLE_SERVICE_ACCOUNT', ''),
+  GOOGLE_CALENDAR_ID: optional('GOOGLE_CALENDAR_ID', ''),
+
   // Polling intervals
   POLL_DATABASE_MS: parseInt(optional('POLL_DATABASE_MS', '60000')),
   POLL_WEBSITE_MS: parseInt(optional('POLL_WEBSITE_MS', '300000')),

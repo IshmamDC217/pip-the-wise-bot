@@ -25,6 +25,29 @@ export interface DBUser {
   email_verified_at?: string;
 }
 
+export interface Reminder {
+  id: string;
+  channelId: string;
+  createdBy: string;
+  message: string;
+  dueAt: string;
+  calendarEventId?: string;
+  notified: boolean;
+}
+
+export interface CalendarEventData {
+  summary: string;
+  date: string;
+  allDay: boolean;
+  time?: string;
+}
+
+export interface CalendarExtraction {
+  events: CalendarEventData[];
+  reminders: { message: string; dueDate: string }[];
+  reply: string;
+}
+
 export interface DBProduct {
   id: number;
   name: string;

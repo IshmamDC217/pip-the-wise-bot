@@ -133,7 +133,7 @@ const MAX_HISTORY = 40;
 const FOLLOW_UP_WINDOW_MS = 3 * 60 * 1000; // 3 minutes
 
 const CALENDAR_KEYWORDS = /\b(remind|reminder|schedule|calendar|event|stall|meeting|deadline|due|appointment|book|by the|before the|on the \d)/i;
-const CALENDAR_READ_KEYWORDS = /\b(what('s| is) coming up|upcoming|my schedule|what do i have|any (events|reminders|meetings)|what('s| is) on (the |my )?calendar|check (the |my )?calendar|show (the |my )?calendar|events? this|events? next|what('s| is) planned|anything (coming up|scheduled|planned))\b/i;
+const CALENDAR_READ_KEYWORDS = /\b(what['\u2019]?s coming up|what is coming up|upcoming|my schedule|what do i have|any (events|reminders|meetings)|what['\u2019]?s on .*(calendar|saturday|sunday|monday|tuesday|wednesday|thursday|friday|weekend)|check .*(calendar|schedule|saturday|sunday|monday|tuesday|wednesday|thursday|friday|weekend)|show .*(calendar|schedule|events)|events? (this|next)|what['\u2019]?s planned|anything (coming up|scheduled|planned|on the calendar|on my calendar)|what['\u2019]?s (on |happening )?(this|next)?\s*(week|month|saturday|sunday|monday|tuesday|wednesday|thursday|friday)|do i have any|have i got any|what['\u2019]?s (the |my )?(schedule|calendar)|anything on)\b/i;
 const SHEETS_KEYWORDS = /\b(spreadsheet|google sheet|make a sheet|create a sheet|list out|price list|table of|itemize|itemise|put (it |that |this |them )?in a sheet|sheet with)\b/i;
 const PRODUCT_CRUD_KEYWORDS = /\b(add (a |new )?product|create (a |new )?product|delete (the |a )?product|remove (the |a )?product|update (the |a )?product|change (the )?price|change (the )?stock|modify (the |a )?product)\b/i;
 const CHECKLIST_KEYWORDS = /\b(checklist|to-?do|task list|tasks?:|items? to do|action items?)\b/i;

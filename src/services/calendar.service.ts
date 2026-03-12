@@ -30,15 +30,21 @@ export const calendarService = {
       const event: any = { summary, description };
 
       if (options.allDay || !options.time) {
+        // Google requires end date = start + 1 day for all-day events
+        const endDate = new Date(date + 'T00:00:00');
+        endDate.setDate(endDate.getDate() + 1);
+        const endDateStr = endDate.toISOString().split('T')[0];
         event.start = { date };
-        event.end = { date };
+        event.end = { date: endDateStr };
       } else {
         const dateTime = `${date}T${options.time}:00`;
+        // Keep end time in the same format as start (not ISO/UTC)
+        const [hours, minutes] = options.time.split(':').map(Number);
+        const endHour = String((hours + 1) % 24).padStart(2, '0');
+        const endTime = `${endHour}:${String(minutes).padStart(2, '0')}`;
+        const endDateTime = `${date}T${endTime}:00`;
         event.start = { dateTime, timeZone: 'Europe/London' };
-        event.end = {
-          dateTime: new Date(new Date(dateTime).getTime() + 3600000).toISOString(),
-          timeZone: 'Europe/London',
-        };
+        event.end = { dateTime: endDateTime, timeZone: 'Europe/London' };
       }
 
       event.reminders = {

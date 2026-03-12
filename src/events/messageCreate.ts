@@ -59,7 +59,9 @@ export async function execute(message: Message) {
 
     // ── Intent: Calendar Read ─────────────────────
     if (aiService.hasCalendarReadIntent(content)) {
+      logger.info({ content }, 'Calendar read intent detected');
       const events = await calendarService.getUpcomingEvents(10);
+      logger.info({ eventCount: events.length, events: events.map((e: any) => e.summary) }, 'Calendar events fetched');
       const embed = buildUpcomingEventsEmbed(events);
 
       // Also get a conversational reply about the events

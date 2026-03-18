@@ -42,6 +42,16 @@ export const config = {
   // Permissions — Discord user IDs allowed to delete products
   ADMIN_USER_IDS: optional('ADMIN_USER_IDS', '447033110773628930,535658393562775562').split(','),
 
+  // ForgeRealm POS API
+  POS_API_URL: optional('POS_API_URL', ''),
+  POS_USERNAME: optional('POS_USERNAME', ''),
+  POS_PASSWORD: optional('POS_PASSWORD', ''),
+
+  // Gmail OAuth2 (run `npx tsx scripts/gmail-auth.ts` to set up)
+  GMAIL_CLIENT_ID: optional('GMAIL_CLIENT_ID', ''),
+  GMAIL_CLIENT_SECRET: optional('GMAIL_CLIENT_SECRET', ''),
+  GMAIL_REFRESH_TOKEN: optional('GMAIL_REFRESH_TOKEN', ''),
+
   // Polling intervals
   POLL_DATABASE_MS: parseInt(optional('POLL_DATABASE_MS', '60000')),
   POLL_WEBSITE_MS: parseInt(optional('POLL_WEBSITE_MS', '300000')),

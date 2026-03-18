@@ -1,29 +1,49 @@
 import { logger } from '../utils/logger.js';
 import type { CalendarExtraction, SheetExtraction, ProductExtraction } from '../types.js';
 
+// Use OpenClaw gateway if running, otherwise fall back to Anthropic API directly
 const OPENCLAW_BASE = process.env.OPENCLAW_GATEWAY_URL || 'http://127.0.0.1:18789';
-const MODEL = 'anthropic/claude-sonnet-4-6';
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+const MODEL_OPENCLAW = 'anthropic/claude-sonnet-4-6';
+const MODEL_ANTHROPIC = 'claude-sonnet-4-6-20250514';
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
 }
 
-interface ChatCompletionResponse {
-  choices: Array<{
-    message: { role: string; content: string };
-  }>;
-}
+let useDirectApi: boolean | null = null; // auto-detect on first call
 
 async function chatCompletion(
   messages: ChatMessage[],
   opts: { max_tokens?: number; temperature?: number } = {},
 ): Promise<string | null> {
+  // Auto-detect: try OpenClaw first, fall back to direct API
+  if (useDirectApi === null) {
+    try {
+      const probe = await fetch(`${OPENCLAW_BASE}/health`, { signal: AbortSignal.timeout(2000) });
+      useDirectApi = !probe.ok;
+    } catch {
+      useDirectApi = true;
+    }
+    logger.info({ useDirectApi }, `AI backend: ${useDirectApi ? 'Anthropic API direct' : 'OpenClaw gateway'}`);
+  }
+
+  if (useDirectApi) {
+    return anthropicCompletion(messages, opts);
+  }
+  return openclawCompletion(messages, opts);
+}
+
+async function openclawCompletion(
+  messages: ChatMessage[],
+  opts: { max_tokens?: number; temperature?: number },
+): Promise<string | null> {
   const res = await fetch(`${OPENCLAW_BASE}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: MODEL,
+      model: MODEL_OPENCLAW,
       messages,
       max_tokens: opts.max_tokens ?? 512,
       temperature: opts.temperature ?? 0.8,
@@ -35,8 +55,40 @@ async function chatCompletion(
     throw new Error(`OpenClaw ${res.status}: ${body}`);
   }
 
-  const data = (await res.json()) as ChatCompletionResponse;
+  const data = (await res.json()) as { choices: Array<{ message: { content: string } }> };
   return data.choices?.[0]?.message?.content ?? null;
+}
+
+async function anthropicCompletion(
+  messages: ChatMessage[],
+  opts: { max_tokens?: number; temperature?: number },
+): Promise<string | null> {
+  const systemMsg = messages.find((m) => m.role === 'system');
+  const convMessages = messages.filter((m) => m.role !== 'system');
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: MODEL_ANTHROPIC,
+      max_tokens: opts.max_tokens ?? 512,
+      temperature: opts.temperature ?? 0.8,
+      system: systemMsg?.content || '',
+      messages: convMessages.map((m) => ({ role: m.role, content: m.content })),
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Anthropic API ${res.status}: ${body}`);
+  }
+
+  const data = (await res.json()) as { content: Array<{ text: string }> };
+  return data.content?.[0]?.text ?? null;
 }
 
 const SYSTEM_PROMPT = `You are Pip — The Wise, the resident know-it-all bot of ForgeRealm. You're sharp, a little sarcastic, and genuinely fun to talk to.
@@ -65,6 +117,14 @@ Knowledge:
 - You can read the Google Calendar and tell people what's coming up
 - You can create Google Sheets with formatted tables (items, prices, etc.)
 - You can manage products in the shop — add, update, and delete (delete requires admin)
+- You monitor Gmail for important emails from Artsmix (stall/event stuff), NatWest (banking), and IONOS (billing only)
+- When an important email comes in, you alert the team in Discord automatically
+- You have access to the ForgeRealm POS (Point of Sale) system for stall/market sales data
+- You can show stall overviews with revenue, units sold, product breakdowns, and cash/card splits
+- You can compare two stalls side-by-side showing what went up/down
+- You can look up specific product sales (e.g. "how many dragons did we sell")
+- You can export stall data as CSV or XLSX files and share them in Discord
+- When someone asks about stall sales, you pull the data from the POS and present it with tables
 - When someone asks you to remind them or schedule something, you handle it
 - When someone asks what's coming up, their schedule, or upcoming events — you check the calendar
 
@@ -170,6 +230,10 @@ const CALENDAR_KEYWORDS = /\b(remind|reminder|schedule|calendar|event|stall|meet
 const CALENDAR_READ_KEYWORDS = /\b(what['\u2019]?s coming up|what is coming up|upcoming|my schedule|what do i have|any (events|reminders|meetings)|what['\u2019]?s on .*(calendar|saturday|sunday|monday|tuesday|wednesday|thursday|friday|weekend)|check .*(calendar|schedule|saturday|sunday|monday|tuesday|wednesday|thursday|friday|weekend)|show .*(calendar|schedule|events)|events? (this|next)|what['\u2019]?s planned|anything (coming up|scheduled|planned|on the calendar|on my calendar)|what['\u2019]?s (on |happening )?(this|next)?\s*(week|month|saturday|sunday|monday|tuesday|wednesday|thursday|friday)|do i have any|have i got any|what['\u2019]?s (the |my )?(schedule|calendar)|anything on)\b/i;
 const SHEETS_KEYWORDS = /\b(spreadsheet|google sheet|make a sheet|create a sheet|list out|price list|table of|itemize|itemise|put (it |that |this |them )?in a sheet|sheet with)\b/i;
 const PRODUCT_CRUD_KEYWORDS = /\b(add (a |new )?product|create (a |new )?product|delete (the |a )?product|remove (the |a )?product|update (the |a )?product|change (the )?price|change (the )?stock|modify (the |a )?product)\b/i;
+const POS_STALL_KEYWORDS = /\b(stall|market|pos stats|pos data|pos sales|pos overview|pos report|event sales|how did .* go|stall (report|stats|overview|summary)|end of day|eod report|sales (report|summary|overview|stats|data|numbers)|how (much|many) .* (sell|sold|made)|what .* (sold|sell|made)|last (stall|market)|recent (stall|market)|what have we sold|what did we sell|revenue|takings|how much .* (make|made|earn|take|took))\b/i;
+const POS_PRODUCT_QUERY_KEYWORDS = /\b(how many .* (sold|sell)|did we sell .*(dragon|keychain|tealight|voronoi|fidget|print)|.* sales of|how .* (dragon|keychain|tealight|voronoi|fidget) .* (do|did|sell|sold|go|went))\b/i;
+const POS_COMPARE_KEYWORDS = /\b(compare|comparison|vs|versus|compared to|last two|both stalls|stall.* differ|how did .* compare)\b/i;
+const POS_EXPORT_KEYWORDS = /\b(export .*(stall|session|sales|pos|data)|download .*(stall|session|sales|report|pos)|get .*(csv|xlsx|file|export)|retrieve .*(csv|xlsx|file|export)|send .*(csv|xlsx|file)|grab .*(csv|xlsx|file)|(csv|xlsx) .*(for|from|of))\b/i;
 const CHECKLIST_KEYWORDS = /\b(checklist|to-?do|task list|tasks?:|items? to do|action items?)\b/i;
 
 export const aiService = {
@@ -251,6 +315,41 @@ export const aiService = {
 
   hasChecklistIntent(message: string): boolean {
     return CHECKLIST_KEYWORDS.test(message);
+  },
+
+  hasPosStallIntent(message: string): boolean {
+    return POS_STALL_KEYWORDS.test(message);
+  },
+
+  hasPosProductQueryIntent(message: string): boolean {
+    return POS_PRODUCT_QUERY_KEYWORDS.test(message);
+  },
+
+  hasPosCompareIntent(message: string): boolean {
+    return POS_COMPARE_KEYWORDS.test(message);
+  },
+
+  hasPosExportIntent(message: string): boolean {
+    return POS_EXPORT_KEYWORDS.test(message);
+  },
+
+  /** Extract a product name from a natural language query like "how many dragons did we sell" */
+  async extractProductName(message: string): Promise<string | null> {
+    try {
+      const raw = await chatCompletion([
+        {
+          role: 'system',
+          content: `You are a product name extraction system for a 3D printing company called ForgeRealm. They sell articulated dragons, keychains, tealight holders, voronoi designs, fidget toys, and other 3D printed items.\n\nExtract the product name or search term the user is asking about. Return ONLY the product name/keyword as plain text, nothing else. If you can't determine a product, return "NONE".`,
+        },
+        { role: 'user', content: message },
+      ], { max_tokens: 64, temperature: 0.1 });
+
+      if (!raw || raw.trim().toUpperCase() === 'NONE') return null;
+      return raw.trim();
+    } catch (err) {
+      logger.error({ err }, 'Product name extraction error');
+      return null;
+    }
   },
 
   // ── Data extraction ───────────────────────────────

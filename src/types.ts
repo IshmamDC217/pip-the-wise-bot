@@ -14,6 +14,7 @@ export interface MonitorState {
   apiUp: boolean;
   apiDownSince: string | null;
   lastNudgeAt: string | null;
+  lastGmailCheck: string | null;
 }
 
 export interface DBUser {

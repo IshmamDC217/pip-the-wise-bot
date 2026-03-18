@@ -16,6 +16,7 @@ const defaultState: MonitorState = {
   apiUp: true,
   apiDownSince: null,
   lastNudgeAt: null,
+  lastGmailCheck: null,
 };
 
 export function loadState(): MonitorState {

@@ -1,12 +1,14 @@
-import { Events, Message, EmbedBuilder } from 'discord.js';
+import { Events, Message, EmbedBuilder, AttachmentBuilder } from 'discord.js';
 import { randomUUID } from 'node:crypto';
 import { aiService } from '../services/ai.service.js';
 import { calendarService } from '../services/calendar.service.js';
 import { sheetsService } from '../services/sheets.service.js';
+import { posService } from '../services/pos.service.js';
 import { db } from '../services/database.service.js';
 import { addReminder } from '../monitors/reminder.monitor.js';
 import { buildCalendarConfirmEmbed, buildUpcomingEventsEmbed } from '../embeds/calendar.embeds.js';
 import { buildSheetCreatedEmbed } from '../embeds/sheets.embeds.js';
+import { buildStallOverviewEmbed, buildStallComparisonEmbed, buildProductQueryEmbed } from '../embeds/pos.embeds.js';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 
@@ -24,6 +26,18 @@ export async function execute(message: Message) {
     return;
   }
   processed.add(message.id);
+
+  // Reply guard — absolutely prevent double replies
+  let hasReplied = false;
+  const safeReply = async (content: string | { content: string; embeds?: any[]; files?: any[] }) => {
+    if (hasReplied) {
+      logger.warn({ msgId: message.id }, 'BLOCKED duplicate reply attempt');
+      return;
+    }
+    hasReplied = true;
+    await safeReply(content);
+  };
+
   logger.info({ msgId: message.id, content: message.content, author: message.author.tag }, 'MSG: handler entered');
   // Keep the set from growing forever
   if (processed.size > 500) {
@@ -63,13 +77,109 @@ export async function execute(message: Message) {
       "i was literally right here the whole time but sure, 'summon' me, very dramatic",
     ];
     const pick = summons[Math.floor(Math.random() * summons.length)];
-    await message.reply(pick);
+    await safeReply(pick);
     aiService.recordActivity(message.channel.id);
     return;
   }
 
   try {
     if ('sendTyping' in message.channel) await message.channel.sendTyping();
+
+    // Check POS intents FIRST (before any AI calls)
+    if (posService.isConfigured()) {
+      if (aiService.hasPosExportIntent(content)) {
+        logger.info({ content }, 'POS EXPORT intent — handling');
+        const sessions = await posService.getSessions();
+        if (sessions.length === 0) {
+          await safeReply("no stall data in the POS yet. go sell some dragons first");
+          aiService.recordActivity(message.channel.id);
+          return;
+        }
+        let targetSession = sessions[0];
+        for (const s of sessions) {
+          if (content.toLowerCase().includes(s.name.toLowerCase()) ||
+              (s.location && content.toLowerCase().includes(s.location.toLowerCase()))) {
+            targetSession = s;
+            break;
+          }
+        }
+        const format = /xlsx|excel/i.test(content) ? 'xlsx' as const : 'csv' as const;
+        const exportData = await posService.getExport(targetSession.id, format);
+        if (exportData) {
+          const attachment = new AttachmentBuilder(exportData.buffer, { name: exportData.filename });
+          await safeReply({ content: `here's the ${format.toUpperCase()} for **${targetSession.name}**`, files: [attachment] });
+        } else {
+          await safeReply("tried to grab the export but the POS isn't playing nice. might be down?");
+        }
+        aiService.recordActivity(message.channel.id);
+        return;
+      }
+
+      if (aiService.hasPosCompareIntent(content)) {
+        logger.info({ content }, 'POS COMPARE intent — handling');
+        const comparison = await posService.getStallComparison();
+        if (!comparison) {
+          await safeReply("need at least two stalls in the POS to compare. you've only got one or none so far");
+          aiService.recordActivity(message.channel.id);
+          return;
+        }
+        const embed = buildStallComparisonEmbed(comparison);
+        const curRev = comparison.current.session.stats.total_revenue;
+        const prevRev = comparison.previous.session.stats.total_revenue;
+        const pctChange = prevRev > 0 ? ((curRev - prevRev) / prevRev * 100).toFixed(1) : '0';
+        const direction = curRev >= prevRev ? 'up' : 'down';
+        const reply = `**${comparison.current.session.name}** vs **${comparison.previous.session.name}** — revenue ${direction} ${Math.abs(parseFloat(pctChange))}%. full breakdown below`;
+        await safeReply({ content: reply, embeds: [embed] });
+        aiService.recordActivity(message.channel.id);
+        return;
+      }
+
+      if (aiService.hasPosProductQueryIntent(content)) {
+        logger.info({ content }, 'POS PRODUCT QUERY intent — handling');
+        const productName = await aiService.extractProductName(content);
+        if (productName) {
+          const result = await posService.getProductFromLastStall(productName);
+          if (result) {
+            const embed = buildProductQueryEmbed(productName, result.matches, result.overview.session.name);
+            let reply: string;
+            if (result.matches.length === 0) {
+              reply = `no "${productName}" sales found in **${result.overview.session.name}**. either we didn't sell any or the name's slightly different`;
+            } else {
+              const totalUnits = result.matches.reduce((s, m) => s + m.units, 0);
+              reply = `sold **${totalUnits}** ${productName} at **${result.overview.session.name}**. details below`;
+            }
+            await safeReply({ content: reply, embeds: [embed] });
+          } else {
+            await safeReply("couldn't pull that from the POS. either it's down or there's no stall data yet");
+          }
+        } else {
+          await safeReply("which product are you asking about? be more specific and i'll dig into the POS data");
+        }
+        aiService.recordActivity(message.channel.id);
+        return;
+      }
+
+      if (aiService.hasPosStallIntent(content)) {
+        logger.info({ content }, 'POS STALL OVERVIEW intent — handling');
+        const overview = await posService.getLastStall();
+        if (!overview) {
+          await safeReply("no stall data in the POS yet. once you run your first session i'll have all the numbers");
+          aiService.recordActivity(message.channel.id);
+          return;
+        }
+        const embed = buildStallOverviewEmbed(overview);
+        const { session, cashTotal, cardTotal } = overview;
+        const rev = session.stats.total_revenue;
+        const units = session.stats.total_units;
+        const best = session.stats.best_seller;
+        const reply = `**${session.name}** at ${session.location || 'unknown'} — £${rev.toFixed(2)} from ${units} units. ` +
+          `cash: £${cashTotal.toFixed(2)}, card: £${cardTotal.toFixed(2)}` +
+          (best ? `. ${best} carried it` : '');
+        await safeReply({ content: reply, embeds: [embed] });
+        aiService.recordActivity(message.channel.id);
+        return;
+      }
+    }
 
     // ── Intent: Calendar Read ─────────────────────
     if (aiService.hasCalendarReadIntent(content)) {
@@ -92,7 +202,7 @@ export async function execute(message: Message) {
         `[CONTEXT: User asked about calendar. Upcoming events: ${eventSummary}. Respond naturally about what's coming up, don't list them all — the embed will show details.] ${content}`,
       );
 
-      await message.reply({ content: reply, embeds: [embed] });
+      await safeReply({ content: reply, embeds: [embed] });
       return;
     }
 
@@ -105,9 +215,9 @@ export async function execute(message: Message) {
 
         if (url) {
           const embed = buildSheetCreatedEmbed(sheetData.sheet.title, url, sheetData.sheet.rows.length);
-          await message.reply({ content: sheetData.reply, embeds: [embed] });
+          await safeReply({ content: sheetData.reply, embeds: [embed] });
         } else {
-          await message.reply("tried to make the sheet but something went wrong on google's end. classic google tbh");
+          await safeReply("tried to make the sheet but something went wrong on google's end. classic google tbh");
         }
         aiService.recordActivity(message.channel.id);
         return;
@@ -143,9 +253,9 @@ export async function execute(message: Message) {
                 .setFooter({ text: 'Pip Shop Manager' });
 
               if (action.description) embed.setDescription(action.description);
-              await message.reply({ content: productData.reply, embeds: [embed] });
+              await safeReply({ content: productData.reply, embeds: [embed] });
             } else {
-              await message.reply("couldn't create that product, database said no. might want to check the logs");
+              await safeReply("couldn't create that product, database said no. might want to check the logs");
             }
             break;
           }
@@ -153,7 +263,7 @@ export async function execute(message: Message) {
           case 'update': {
             const product = await db.getProductByName(action.name);
             if (!product) {
-              await message.reply(`couldn't find a product matching "${action.name}". double check the name?`);
+              await safeReply(`couldn't find a product matching "${action.name}". double check the name?`);
               break;
             }
 
@@ -173,9 +283,9 @@ export async function execute(message: Message) {
                   .setTimestamp()
                   .setFooter({ text: 'Pip Shop Manager' });
 
-                await message.reply({ content: productData.reply, embeds: [embed] });
+                await safeReply({ content: productData.reply, embeds: [embed] });
               } else {
-                await message.reply("update failed, something went wrong with the database");
+                await safeReply("update failed, something went wrong with the database");
               }
             }
             break;
@@ -184,13 +294,13 @@ export async function execute(message: Message) {
           case 'delete': {
             // Permission check
             if (!config.ADMIN_USER_IDS.includes(message.author.id)) {
-              await message.reply("nice try but you don't have delete permissions. only admins can do that one");
+              await safeReply("nice try but you don't have delete permissions. only admins can do that one");
               break;
             }
 
             const product = await db.getProductByName(action.name);
             if (!product) {
-              await message.reply(`couldn't find a product matching "${action.name}". you sure about that name?`);
+              await safeReply(`couldn't find a product matching "${action.name}". you sure about that name?`);
               break;
             }
 
@@ -207,9 +317,9 @@ export async function execute(message: Message) {
                 .setTimestamp()
                 .setFooter({ text: 'Pip Shop Manager' });
 
-              await message.reply({ content: productData.reply, embeds: [embed] });
+              await safeReply({ content: productData.reply, embeds: [embed] });
             } else {
-              await message.reply("delete failed. product might already be gone or the database is being weird");
+              await safeReply("delete failed. product might already be gone or the database is being weird");
             }
             break;
           }
@@ -259,7 +369,7 @@ export async function execute(message: Message) {
           });
         }
 
-        await message.reply({
+        await safeReply({
           content: calData.reply,
           embeds: [buildCalendarConfirmEmbed(calData)],
         });
@@ -275,7 +385,7 @@ export async function execute(message: Message) {
       content,
     );
 
-    await message.reply(reply);
+    await safeReply(reply);
   } catch (err) {
     logger.error({ err }, 'Failed to process message');
   }

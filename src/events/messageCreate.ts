@@ -13,9 +13,23 @@ import { logger } from '../utils/logger.js';
 export const name = Events.MessageCreate;
 export const once = false;
 
+// Dedup guard — prevent processing the same message twice
+const processed = new Set<string>();
+
 export async function execute(message: Message) {
   if (message.author.bot) return;
   if (!message.guild) return;
+  if (processed.has(message.id)) {
+    logger.warn({ msgId: message.id }, 'DEDUP: blocked duplicate message');
+    return;
+  }
+  processed.add(message.id);
+  logger.info({ msgId: message.id, content: message.content, author: message.author.tag }, 'MSG: handler entered');
+  // Keep the set from growing forever
+  if (processed.size > 500) {
+    const first = processed.values().next().value;
+    if (first) processed.delete(first);
+  }
 
   const content = message.content.replace(/<@!?\d+>/g, '').trim();
   if (!content) return;

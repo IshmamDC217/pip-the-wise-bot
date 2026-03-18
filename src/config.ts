@@ -32,8 +32,8 @@ export const config = {
   DB_PASS: optional('DB_PASS', ''),
   DB_NAME: optional('DB_NAME', 'forgerealm'),
 
-  // Groq AI
-  GROQ_API_KEY: required('GROQ_API_KEY'),
+  // OpenClaw gateway (replaces direct Anthropic calls)
+  OPENCLAW_GATEWAY_URL: optional('OPENCLAW_GATEWAY_URL', 'http://127.0.0.1:18789'),
 
   // Google (Calendar + Sheets share the same service account)
   GOOGLE_SERVICE_ACCOUNT: optional('GOOGLE_SERVICE_ACCOUNT', ''),

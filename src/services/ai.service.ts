@@ -1,9 +1,43 @@
-import Groq from 'groq-sdk';
-import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import type { CalendarExtraction, SheetExtraction, ProductExtraction } from '../types.js';
 
-const groq = new Groq({ apiKey: config.GROQ_API_KEY });
+const OPENCLAW_BASE = process.env.OPENCLAW_GATEWAY_URL || 'http://127.0.0.1:18789';
+const MODEL = 'anthropic/claude-sonnet-4-6';
+
+interface ChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+interface ChatCompletionResponse {
+  choices: Array<{
+    message: { role: string; content: string };
+  }>;
+}
+
+async function chatCompletion(
+  messages: ChatMessage[],
+  opts: { max_tokens?: number; temperature?: number } = {},
+): Promise<string | null> {
+  const res = await fetch(`${OPENCLAW_BASE}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: MODEL,
+      messages,
+      max_tokens: opts.max_tokens ?? 512,
+      temperature: opts.temperature ?? 0.8,
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`OpenClaw ${res.status}: ${body}`);
+  }
+
+  const data = (await res.json()) as ChatCompletionResponse;
+  return data.choices?.[0]?.message?.content ?? null;
+}
 
 const SYSTEM_PROMPT = `You are Pip — The Wise, the resident know-it-all bot of ForgeRealm. You're sharp, a little sarcastic, and genuinely fun to talk to.
 
@@ -149,17 +183,13 @@ export const aiService = {
         history.splice(0, history.length - MAX_HISTORY);
       }
 
-      const completion = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          ...history.map((h) => ({ role: h.role, content: h.content })),
-        ],
-        max_tokens: 512,
-        temperature: 0.8,
-      });
+      const messages: ChatMessage[] = [
+        { role: 'system', content: SYSTEM_PROMPT },
+        ...history.map((h) => ({ role: h.role, content: h.content }) as ChatMessage),
+      ];
 
-      const reply = completion.choices[0]?.message?.content || "hmm, my brain glitched for a sec. try again?";
+      const reply = await chatCompletion(messages, { max_tokens: 512, temperature: 0.8 })
+        ?? "hmm, my brain glitched for a sec. try again?";
 
       history.push({ role: 'assistant', content: reply, timestamp: Date.now() });
       conversations.set(channelId, history);
@@ -167,7 +197,7 @@ export const aiService = {
 
       return reply;
     } catch (err) {
-      logger.error({ err }, 'Groq API error');
+      logger.error({ err }, 'Anthropic API error');
       return "something went wrong on my end, give me a moment and try again";
     }
   },
@@ -180,17 +210,10 @@ export const aiService = {
       // Get last few messages for context
       const recent = history.slice(-6).map((h) => `${h.role === 'user' ? 'User' : 'Pip'}: ${h.content}`).join('\n');
 
-      const completion = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-          { role: 'system', content: RELEVANCE_PROMPT },
-          { role: 'user', content: `Recent conversation:\n${recent}\n\nNew message: "${message}"\n\nIs this message relevant to the ongoing conversation with Pip?` },
-        ],
-        max_tokens: 8,
-        temperature: 0.1,
-      });
-
-      const answer = completion.choices[0]?.message?.content?.trim().toLowerCase();
+      const answer = (await chatCompletion([
+        { role: 'system', content: RELEVANCE_PROMPT },
+        { role: 'user', content: `Recent conversation:\n${recent}\n\nNew message: "${message}"\n\nIs this message relevant to the ongoing conversation with Pip?` },
+      ], { max_tokens: 8, temperature: 0.1 }))?.trim().toLowerCase() ?? 'no';
       return answer === 'yes';
     } catch (err) {
       logger.error({ err }, 'Relevance check error');
@@ -237,17 +260,10 @@ export const aiService = {
       const today = new Date().toISOString().split('T')[0];
       const prompt = CALENDAR_EXTRACTION_PROMPT.replace('{{TODAY}}', today);
 
-      const completion = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-          { role: 'system', content: prompt },
-          { role: 'user', content: message },
-        ],
-        max_tokens: 1024,
-        temperature: 0.1,
-      });
-
-      const raw = completion.choices[0]?.message?.content;
+      const raw = await chatCompletion([
+        { role: 'system', content: prompt },
+        { role: 'user', content: message },
+      ], { max_tokens: 1024, temperature: 0.1 });
       if (!raw) return null;
 
       const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -266,17 +282,10 @@ export const aiService = {
 
   async extractSheetData(message: string): Promise<SheetExtraction | null> {
     try {
-      const completion = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-          { role: 'system', content: SHEETS_EXTRACTION_PROMPT },
-          { role: 'user', content: message },
-        ],
-        max_tokens: 2048,
-        temperature: 0.1,
-      });
-
-      const raw = completion.choices[0]?.message?.content;
+      const raw = await chatCompletion([
+        { role: 'system', content: SHEETS_EXTRACTION_PROMPT },
+        { role: 'user', content: message },
+      ], { max_tokens: 2048, temperature: 0.1 });
       if (!raw) return null;
 
       const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -296,17 +305,10 @@ export const aiService = {
 
   async extractProductAction(message: string): Promise<ProductExtraction | null> {
     try {
-      const completion = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-          { role: 'system', content: PRODUCT_EXTRACTION_PROMPT },
-          { role: 'user', content: message },
-        ],
-        max_tokens: 512,
-        temperature: 0.1,
-      });
-
-      const raw = completion.choices[0]?.message?.content;
+      const raw = await chatCompletion([
+        { role: 'system', content: PRODUCT_EXTRACTION_PROMPT },
+        { role: 'user', content: message },
+      ], { max_tokens: 512, temperature: 0.1 });
       if (!raw) return null;
 
       const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();

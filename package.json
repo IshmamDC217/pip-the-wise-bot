@@ -9,10 +9,12 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "register": "tsx src/commands/index.ts",
-    "ready": "tsx scripts/ready-page.tsx"
+    "ready": "tsx scripts/ready-page.tsx",
+    "mcp": "tsx src/mcp/server.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.79.0",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.7",
     "googleapis": "^171.4.0",

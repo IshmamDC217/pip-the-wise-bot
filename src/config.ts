@@ -25,6 +25,11 @@ export const config = {
   FORGEREALM_API_URL: optional('FORGEREALM_API_URL', 'https://api.forgerealm.co.uk'),
   FORGEREALM_SITE_URL: optional('FORGEREALM_SITE_URL', 'https://forgerealm.co.uk'),
 
+  // ForgeRealm POS
+  POS_URL: optional('POS_API_URL', 'https://forgerealm-pos.onrender.com'),
+  POS_USERNAME: optional('POS_USERNAME', ''),
+  POS_PASSWORD: optional('POS_PASSWORD', ''),
+
   // MySQL
   DB_HOST: optional('DB_HOST', 'localhost'),
   DB_PORT: parseInt(optional('DB_PORT', '3306')),
@@ -32,8 +37,8 @@ export const config = {
   DB_PASS: optional('DB_PASS', ''),
   DB_NAME: optional('DB_NAME', 'forgerealm'),
 
-  // OpenClaw gateway (replaces direct Anthropic calls)
-  OPENCLAW_GATEWAY_URL: optional('OPENCLAW_GATEWAY_URL', 'http://127.0.0.1:18789'),
+  // Groq
+  GROQ_API_KEY: required('GROQ_API_KEY'),
 
   // Google (Calendar + Sheets share the same service account)
   GOOGLE_SERVICE_ACCOUNT: optional('GOOGLE_SERVICE_ACCOUNT', ''),

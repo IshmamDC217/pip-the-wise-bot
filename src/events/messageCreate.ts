@@ -5,8 +5,10 @@ import { calendarService } from '../services/calendar.service.js';
 import { sheetsService } from '../services/sheets.service.js';
 import { db } from '../services/database.service.js';
 import { addReminder } from '../monitors/reminder.monitor.js';
+import { posService } from '../services/pos.service.js';
 import { buildCalendarConfirmEmbed, buildUpcomingEventsEmbed } from '../embeds/calendar.embeds.js';
 import { buildSheetCreatedEmbed } from '../embeds/sheets.embeds.js';
+import { buildSessionStatsEmbed, buildSessionsOverviewEmbed } from '../embeds/pos.embeds.js';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 
@@ -94,6 +96,61 @@ export async function execute(message: Message) {
 
       await message.reply({ content: reply, embeds: [embed] });
       return;
+    }
+
+    // ── Intent: POS / Stall Data ────────────────────
+    if (aiService.hasPosIntent(content) && posService.isConfigured()) {
+      logger.info({ content }, 'POS intent detected');
+
+      try {
+        // Determine if they want a specific session or an overview
+        const wantsOverview = /\b(all (stalls|sessions|events)|session(s)? (list|overview|history)|every (stall|session))\b/i.test(content);
+
+        if (wantsOverview) {
+          const sessions = await posService.getSessions();
+          const summaryText = await posService.buildAllSessionsSummary();
+          const embed = buildSessionsOverviewEmbed(sessions);
+
+          const reply = await aiService.chat(
+            message.channel.id,
+            message.author.displayName,
+            `[CONTEXT: User asked about POS sessions. Here is the data from the POS system:\n${summaryText}\nRespond naturally about the sessions — the embed shows the details. Keep it casual.] ${content}`,
+          );
+
+          await message.reply({ content: reply, embeds: [embed] });
+        } else {
+          // Get the most recent (or contextually relevant) session
+          const summaryText = await posService.buildSessionSummary();
+          const sessions = await posService.getSessions();
+          const latestDetail = sessions.length > 0 ? await posService.getSession(sessions[0].id) : null;
+
+          const embeds = [];
+          if (latestDetail) {
+            embeds.push(buildSessionStatsEmbed(latestDetail));
+          }
+
+          const reply = await aiService.chat(
+            message.channel.id,
+            message.author.displayName,
+            `[CONTEXT: User asked about POS/stall performance. Here is the data from the POS system:\n${summaryText}\nRespond naturally with insights about the numbers — highlight interesting stuff like best sellers, revenue, etc. The embed shows the key stats. Keep it casual and in character.] ${content}`,
+          );
+
+          await message.reply({ content: reply, embeds });
+        }
+
+        aiService.recordActivity(message.channel.id);
+        return;
+      } catch (err) {
+        logger.error({ err }, 'POS data fetch failed');
+        const reply = await aiService.chat(
+          message.channel.id,
+          message.author.displayName,
+          `[CONTEXT: User asked about POS data but the fetch failed. The POS system might be waking up (it's on Render free tier so it can take a minute to spin up). Let them know you tried but the POS is being slow, suggest trying again in a minute.] ${content}`,
+        );
+        await message.reply(reply);
+        aiService.recordActivity(message.channel.id);
+        return;
+      }
     }
 
     // ── Intent: Google Sheets ─────────────────────

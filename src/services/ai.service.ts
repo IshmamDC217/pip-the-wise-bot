@@ -1,8 +1,9 @@
 import { logger } from '../utils/logger.js';
+import { config } from '../config.js';
 import type { CalendarExtraction, SheetExtraction, ProductExtraction } from '../types.js';
 
-const OPENCLAW_BASE = process.env.OPENCLAW_GATEWAY_URL || 'http://127.0.0.1:18789';
-const MODEL = 'anthropic/claude-sonnet-4-6';
+const GROQ_BASE = 'https://api.groq.com/openai/v1';
+const MODEL = 'llama-3.3-70b-versatile';
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -19,9 +20,12 @@ async function chatCompletion(
   messages: ChatMessage[],
   opts: { max_tokens?: number; temperature?: number } = {},
 ): Promise<string | null> {
-  const res = await fetch(`${OPENCLAW_BASE}/v1/chat/completions`, {
+  const res = await fetch(`${GROQ_BASE}/chat/completions`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.GROQ_API_KEY}`,
+    },
     body: JSON.stringify({
       model: MODEL,
       messages,
@@ -32,7 +36,7 @@ async function chatCompletion(
 
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`OpenClaw ${res.status}: ${body}`);
+    throw new Error(`Groq ${res.status}: ${body}`);
   }
 
   const data = (await res.json()) as ChatCompletionResponse;
@@ -65,6 +69,8 @@ Knowledge:
 - You can read the Google Calendar and tell people what's coming up
 - You can create Google Sheets with formatted tables (items, prices, etc.)
 - You can manage products in the shop — add, update, and delete (delete requires admin)
+- You have access to the ForgeRealm POS (Point of Sale) system — you can pull stall/event session data, sales figures, revenue breakdowns, best sellers, stock levels, and payment method splits
+- When someone asks about stall performance, sales, revenue, or POS data, you fetch it from the POS system
 - When someone asks you to remind them or schedule something, you handle it
 - When someone asks what's coming up, their schedule, or upcoming events — you check the calendar
 
@@ -171,6 +177,7 @@ const CALENDAR_READ_KEYWORDS = /\b(what['\u2019]?s coming up|what is coming up|u
 const SHEETS_KEYWORDS = /\b(spreadsheet|google sheet|make a sheet|create a sheet|list out|price list|table of|itemize|itemise|put (it |that |this |them )?in a sheet|sheet with)\b/i;
 const PRODUCT_CRUD_KEYWORDS = /\b(add (a |new )?product|create (a |new )?product|delete (the |a )?product|remove (the |a )?product|update (the |a )?product|change (the )?price|change (the )?stock|modify (the |a )?product)\b/i;
 const CHECKLIST_KEYWORDS = /\b(checklist|to-?do|task list|tasks?:|items? to do|action items?)\b/i;
+const POS_KEYWORDS = /\b(pos|point of sale|stall (performance|sales|revenue|report|stats|summary|data|numbers)|how did (we|the stall|the event|the market) (do|perform|go|sell)|sales (report|data|summary|numbers|today|yesterday|last|this)|revenue (report|today|yesterday|last|this)|stall (report|recap|breakdown)|how much did we (make|sell|earn)|what did we (make|sell|earn)|cash vs card|payment (split|breakdown)|best sell(er|ing)|stock (report|summary|level|check|count)|how many did we sell|total (sales|revenue|units)|all (stalls|sessions|events)|session(s)? (list|overview|history))\b/i;
 
 export const aiService = {
   async chat(channelId: string, username: string, message: string): Promise<string> {
@@ -251,6 +258,10 @@ export const aiService = {
 
   hasChecklistIntent(message: string): boolean {
     return CHECKLIST_KEYWORDS.test(message);
+  },
+
+  hasPosIntent(message: string): boolean {
+    return POS_KEYWORDS.test(message);
   },
 
   // ── Data extraction ───────────────────────────────

@@ -7,6 +7,7 @@ import { logger } from '../utils/logger.js';
 import type { MonitorState } from '../types.js';
 
 let state: MonitorState;
+let dbUnavailableLogged = false;
 
 export function startDatabaseMonitor(client: Client) {
   state = loadState();
@@ -19,6 +20,20 @@ export function startDatabaseMonitor(client: Client) {
 
 async function poll(client: Client) {
   try {
+    // Skip silently if DB is unreachable (e.g. RDS not whitelisted)
+    const connected = await db.isConnected();
+    if (!connected) {
+      if (!dbUnavailableLogged) {
+        logger.warn('Database unreachable — monitor paused until connection is restored');
+        dbUnavailableLogged = true;
+      }
+      return;
+    }
+    if (dbUnavailableLogged) {
+      logger.info('Database connection restored — monitor resumed');
+      dbUnavailableLogged = false;
+    }
+
     const channel = client.channels.cache.get(config.CHANNEL_SHOP) as TextChannel;
     if (!channel) return;
 

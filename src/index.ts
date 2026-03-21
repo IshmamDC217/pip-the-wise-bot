@@ -1,3 +1,4 @@
+import { createServer } from 'node:http';
 import { Client, GatewayIntentBits } from 'discord.js';
 import { config } from './config.js';
 import { logger } from './utils/logger.js';
@@ -38,6 +39,13 @@ process.on('SIGTERM', () => {
   client.destroy();
   process.exit(0);
 });
+
+// Health server for Render (free tier requires an open port)
+const PORT = parseInt(process.env.PORT || '10000');
+createServer((_req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
+}).listen(PORT, () => logger.info({ port: PORT }, 'Health server listening'));
 
 // Start
 async function main() {

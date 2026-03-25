@@ -119,10 +119,19 @@ export async function execute(message: Message) {
 
           await message.reply({ content: reply, embeds: [embed] });
         } else {
-          // Get the most recent (or contextually relevant) session
-          const summaryText = await posService.buildSessionSummary();
+          // Try to find a specific session by name/number
           const sessions = await posService.getSessions();
-          const latestDetail = sessions.length > 0 ? await posService.getSession(sessions[0].id) : null;
+          const stallMatch = content.match(/stall\s*(\d+|[a-z]+)/i);
+          let targetSession = sessions[0]; // default: most recent
+          if (stallMatch) {
+            const found = sessions.find(s => s.name.toLowerCase().includes(stallMatch[0].toLowerCase()));
+            if (found) targetSession = found;
+          }
+
+          const summaryText = targetSession
+            ? await posService.buildSessionSummary(targetSession.id)
+            : await posService.buildSessionSummary();
+          const latestDetail = targetSession ? await posService.getSession(targetSession.id) : null;
 
           const embeds = [];
           if (latestDetail) {

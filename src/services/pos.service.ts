@@ -73,6 +73,9 @@ async function authenticate(): Promise<string> {
     throw new Error('POS credentials not configured (POS_USERNAME / POS_PASSWORD)');
   }
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45000); // POS cold start can take a while
+
   const res = await fetch(`${BASE}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -80,7 +83,10 @@ async function authenticate(): Promise<string> {
       username: config.POS_USERNAME,
       password: config.POS_PASSWORD,
     }),
+    signal: controller.signal,
   });
+
+  clearTimeout(timeout);
 
   if (!res.ok) {
     const body = await res.text();
@@ -94,18 +100,38 @@ async function authenticate(): Promise<string> {
   return cachedToken;
 }
 
-async function posGet<T>(path: string): Promise<T> {
+async function posGet<T>(path: string, retries = 1): Promise<T> {
   const token = await authenticate();
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`POS GET ${path} failed (${res.status}): ${body}`);
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), attempt === 0 ? 15000 : 45000);
+
+    try {
+      const res = await fetch(`${BASE}${path}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`POS GET ${path} failed (${res.status}): ${body}`);
+      }
+
+      return (await res.json()) as T;
+    } catch (err: any) {
+      clearTimeout(timeout);
+      if (attempt < retries && (err.name === 'AbortError' || err.code === 'ECONNRESET')) {
+        logger.warn({ path, attempt }, 'POS request timed out, retrying (cold start?)');
+        continue;
+      }
+      throw err;
+    }
   }
 
-  return (await res.json()) as T;
+  throw new Error(`POS GET ${path} failed after ${retries + 1} attempts`);
 }
 
 export const posService = {

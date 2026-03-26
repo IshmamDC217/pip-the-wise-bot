@@ -63,11 +63,25 @@ interface POSStockSummary {
   };
 }
 
+async function wakeUp(): Promise<void> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
+    await fetch(`${BASE}/api/health`, { signal: controller.signal });
+    clearTimeout(timeout);
+  } catch {
+    // If health check fails, auth will fail too — let it bubble there
+  }
+}
+
 async function authenticate(): Promise<string> {
   // Reuse cached token if still valid (with 1-hour buffer)
   if (cachedToken && Date.now() < tokenExpiresAt - 3600000) {
     return cachedToken;
   }
+
+  // Wake up POS if it's sleeping (Render free tier cold start)
+  await wakeUp();
 
   if (!config.POS_USERNAME || !config.POS_PASSWORD) {
     throw new Error('POS credentials not configured (POS_USERNAME / POS_PASSWORD)');
@@ -105,7 +119,7 @@ async function posGet<T>(path: string, retries = 1): Promise<T> {
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), attempt === 0 ? 15000 : 45000);
+    const timeout = setTimeout(() => controller.abort(), 30000);
 
     try {
       const res = await fetch(`${BASE}${path}`, {

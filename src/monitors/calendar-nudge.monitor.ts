@@ -30,7 +30,7 @@ async function checkAndNudge(client: Client) {
     const now = Date.now();
 
     // If we've never nudged, or enough time has passed since last nudge
-    const lastNudge = state.lastNudgeAt ? new Date(state.lastNudgeAt).getTime() : 0;
+    const lastNudge = state.lastNudgeAt ? new Date(state.lastNudgeAt).getTime() : now;
     const elapsed = now - lastNudge;
 
     if (elapsed < config.NUDGE_INTERVAL_MS) return;

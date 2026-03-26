@@ -51,5 +51,5 @@ export const config = {
   POLL_DATABASE_MS: parseInt(optional('POLL_DATABASE_MS', '60000')),
   POLL_WEBSITE_MS: parseInt(optional('POLL_WEBSITE_MS', '300000')),
   POLL_API_HEALTH_MS: parseInt(optional('POLL_API_HEALTH_MS', '180000')),
-  NUDGE_INTERVAL_MS: parseInt(optional('NUDGE_INTERVAL_MS', String(4 * 24 * 60 * 60 * 1000))),
+  NUDGE_INTERVAL_MS: parseInt(optional('NUDGE_INTERVAL_MS', String(7 * 24 * 60 * 60 * 1000))),
 } as const;

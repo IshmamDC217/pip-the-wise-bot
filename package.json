@@ -10,7 +10,10 @@
     "dev": "tsx watch src/index.ts",
     "register": "tsx src/commands/index.ts",
     "ready": "tsx scripts/ready-page.tsx",
-    "mcp": "tsx src/mcp/server.ts"
+    "mcp": "tsx src/mcp/server.ts",
+    "service:install": "npm run build && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-service/install.ps1",
+    "service:uninstall": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-service/uninstall.ps1",
+    "service:logs": "powershell -NoProfile -Command \"Get-Content -Path logs/stdout.log,logs/stderr.log -Tail 50 -Wait\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.79.0",

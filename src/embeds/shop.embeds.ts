@@ -39,7 +39,7 @@ export function buildNewProductEmbed(product: DBProduct): EmbedBuilder {
     .setTitle('New Product Added')
     .setDescription(`**${product.name}**`)
     .addFields(
-      { name: 'Price', value: `£${product.price.toFixed(2)}`, inline: true },
+      { name: 'Price', value: `£${Number(product.price).toFixed(2)}`, inline: true },
       { name: 'Stock', value: `${product.stock} units`, inline: true },
     )
     .setFooter({ text: 'ForgeRealm Shop' })

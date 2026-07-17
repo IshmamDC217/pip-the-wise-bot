@@ -10,13 +10,13 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administra
     Write-Host 'Elevating to administrator...'
     $passthru = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"")
     if ($ServiceName -ne 'ForgeRealmPip') { $passthru += @('-ServiceName',$ServiceName) }
-    Start-Process powershell -ArgumentList $passthru -Verb RunAs
-    exit
+    $elevated = Start-Process powershell -ArgumentList $passthru -Verb RunAs -Wait -PassThru
+    exit $elevated.ExitCode
 }
 
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if (-not $existing) {
-    Write-Host "Service '$ServiceName' is not installed — nothing to do."
+    Write-Host "Service '$ServiceName' is not installed - nothing to do."
     exit 0
 }
 

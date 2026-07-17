@@ -4,9 +4,9 @@ import { aiService } from '../services/ai.service.js';
 import { calendarService } from '../services/calendar.service.js';
 import { sheetsService } from '../services/sheets.service.js';
 import { db } from '../services/database.service.js';
-import { addReminder } from '../monitors/reminder.monitor.js';
+import { addReminder, cancelReminder, getPendingReminders } from '../monitors/reminder.monitor.js';
 import { posService } from '../services/pos.service.js';
-import { buildCalendarConfirmEmbed, buildUpcomingEventsEmbed } from '../embeds/calendar.embeds.js';
+import { buildCalendarConfirmEmbed, buildUpcomingEventsEmbed, buildPendingRemindersEmbed } from '../embeds/calendar.embeds.js';
 import { buildSheetCreatedEmbed } from '../embeds/sheets.embeds.js';
 import { buildSessionStatsEmbed, buildSessionsOverviewEmbed } from '../embeds/pos.embeds.js';
 import { config } from '../config.js';
@@ -17,6 +17,78 @@ export const once = false;
 
 // Dedup guard — prevent processing the same message twice
 const processed = new Set<string>();
+
+// Canned failure lines: phrasing an apology does not need a full LLM call,
+// and these stay honest about what actually happened (the POS is on Netlify
+// now, there is no cold start to wait out).
+const POS_FAIL_LINES = [
+  "tried to pull the pos data but the request failed on my end. give it a minute and ask again",
+  "the pos isn't answering me right now. try again shortly and i'll have another crack at it",
+  "couldn't fetch the numbers just now, something's off with the pos connection. retry in a bit",
+];
+
+const pickLine = (lines: string[]) => lines[Math.floor(Math.random() * lines.length)];
+
+const FORGET_PATTERN = /\b(forget|reset|wipe|clear) (the |this |our |your )?(chat|convo|conversation|history|memory)\b/i;
+// Anchored to the end of the message so "pip usage" matches but a passing
+// mention like "the memory usage on the server" does not.
+const USAGE_PATTERN = /\b((token|ai|groq|api)\s+)?(usage|quota)(\s+(report|stats|check))?\s*\??\s*$/i;
+
+const CANCEL_REMINDER_PATTERN = /\b(cancel|delete|remove|scrap|drop)\b.*\breminders?\b/i;
+
+// "remind me in 20 mins to flip the print" — handled in code, not by the LLM:
+// small models get relative date arithmetic wrong (verified: "in 2 hours"
+// landed on tomorrow), and this path costs zero tokens.
+const RELATIVE_REMINDER_PATTERN = /\bremind\s+(?:me|us)\b(.*?)\bin\s+(\d+|a|an)\s*(minutes?|mins?|m|hours?|hrs?|h|days?|d)\b(.*)/i;
+
+function parseRelativeReminder(content: string): { dueAt: Date; task: string } | null {
+  const m = content.match(RELATIVE_REMINDER_PATTERN);
+  if (!m) return null;
+  const n = /^\d+$/.test(m[2]) ? parseInt(m[2]) : 1;
+  const unit = m[3].toLowerCase();
+  const ms = unit.startsWith('d') ? n * 86400000 : unit.startsWith('h') ? n * 3600000 : n * 60000;
+  if (ms <= 0 || ms > 365 * 86400000) return null;
+  const task = `${m[1]} ${m[4]}`.replace(/^\s*(to|that|about)\b/i, '').replace(/\s+/g, ' ').trim();
+  return { dueAt: new Date(Date.now() + ms), task: task || 'you asked me to remind you' };
+}
+
+/** Strip command/filler words so "cancel the reminder about the float" -> "float". */
+function extractCancelQuery(content: string): string {
+  return content
+    .replace(/\breminders?\b/gi, ' ')
+    .replace(/\b(cancel|delete|remove|scrap|drop|the|that|this|my|a|an|pip|please|pls|about|for|to|one)\b/gi, ' ')
+    .replace(/[^\w\s'’-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Build a reminder timestamp from LLM-extracted date/time. The extraction model
+ * can emit unpadded times ("9:00") or malformed dates; an unchecked
+ * new Date().toISOString() would throw AFTER the calendar event was created,
+ * killing the reply. Returns null when the date is unusable.
+ */
+function reminderDueAt(date: string, time?: string | null): string | null {
+  const t = time && /^\d{1,2}:\d{2}$/.test(time) ? time.padStart(5, '0') : '09:00';
+  const d = new Date(`${date}T${t}:00`);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+/** Exact-number stall matching: "stall 1" must never resolve to "Stall 13". */
+function findStallSession<T extends { name: string }>(sessions: T[], content: string): T | null {
+  const numMatch = content.match(/\bstall\s*#?(\d+)\b/i);
+  if (numMatch) {
+    return sessions.find(s => {
+      const sessionNum = s.name.match(/\bstall\s*#?(\d+)\b/i);
+      return sessionNum?.[1] === numMatch[1];
+    }) ?? null;
+  }
+  const nameMatch = content.match(/\bstall\s+([a-z][\w-]*)/i);
+  if (nameMatch && !/^(performance|sales|revenue|report|stats|summary|data|numbers|recap|breakdown|do|did|went|going)$/i.test(nameMatch[1])) {
+    return sessions.find(s => s.name.toLowerCase().includes(nameMatch[1].toLowerCase())) ?? null;
+  }
+  return null;
+}
 
 export async function execute(message: Message) {
   if (message.author.bot) return;
@@ -38,9 +110,15 @@ export async function execute(message: Message) {
 
   const mentioned = message.mentions.has(message.client.user!);
   const saysPip = /\bpip\b/i.test(message.content);
-  const isReply = message.reference?.messageId
-    ? (await message.channel.messages.fetch(message.reference.messageId).catch(() => null))?.author?.id === message.client.user!.id
-    : false;
+
+  // Only pay the REST fetch for the referenced message when the cheap triggers
+  // missed — most guild replies have nothing to do with the bot.
+  let isReply = false;
+  if (!mentioned && !saysPip && message.reference?.messageId) {
+    const referenced = message.channel.messages.cache.get(message.reference.messageId)
+      ?? await message.channel.messages.fetch(message.reference.messageId).catch(() => null);
+    isReply = referenced?.author?.id === message.client.user!.id;
+  }
 
   const explicitTrigger = mentioned || saysPip || isReply;
 
@@ -52,50 +130,98 @@ export async function execute(message: Message) {
 
   if (!explicitTrigger && !implicitTrigger) return;
 
-  // Summon easter egg
-  if (/summon\s+pip/i.test(content)) {
-    const summons = [
-      "you rang? this better be good i was in the middle of something important (nothing)",
-      "oh hey, was wondering when someone would need me. what's up",
-      "i have arrived. try to contain your excitement",
-      "you summoned me like i wasn't already here watching everything. anyway what's good",
-      "yeah yeah i'm here, what do you need — and don't say 'nothing' i can see you typing",
-      "look who needs pip. can't say i'm surprised tbh, i am pretty great",
-      "reporting for duty or whatever. seriously though what's going on",
-      "i was literally right here the whole time but sure, 'summon' me, very dramatic",
-    ];
-    const pick = summons[Math.floor(Math.random() * summons.length)];
-    await message.reply(pick);
-    aiService.recordActivity(message.channel.id);
-    return;
-  }
+  const isAdmin = config.ADMIN_USER_IDS.includes(message.author.id);
 
   try {
+    // Summon easter egg
+    if (/summon\s+pip/i.test(content)) {
+      const summons = [
+        "you rang? this better be good i was in the middle of something important (nothing)",
+        "oh hey, was wondering when someone would need me. what's up",
+        "i have arrived. try to contain your excitement",
+        "you summoned me like i wasn't already here watching everything. anyway what's good",
+        "yeah yeah i'm here, what do you need — and don't say 'nothing' i can see you typing",
+        "look who needs pip. can't say i'm surprised tbh, i am pretty great",
+        "reporting for duty or whatever. seriously though what's going on",
+        "i was literally right here the whole time but sure, 'summon' me, very dramatic",
+      ];
+      await message.reply(pickLine(summons));
+      aiService.recordActivity(message.channel.id);
+      return;
+    }
+
+    // ── Admin: reset a wedged channel's conversation history ──
+    if (isAdmin && explicitTrigger && FORGET_PATTERN.test(content)) {
+      aiService.clearHistory(message.channel.id);
+      await message.reply("wiped. fresh start, who are you people again");
+      return;
+    }
+
+    // ── Admin: Groq usage check ──────────────────
+    if (isAdmin && explicitTrigger && USAGE_PATTERN.test(content)) {
+      const stats = aiService.getUsageStats();
+      if (stats.length === 0) {
+        await message.reply("no ai calls tracked since my last restart. quiet day");
+      } else {
+        const lines = stats.map(s => {
+          const hours = Math.max(1, Math.round((Date.now() - s.since) / 3600000));
+          return `**${s.model}**: ${s.requests} requests, ~${s.tokens.toLocaleString()} tokens over the last ${hours}h`;
+        });
+        await message.reply(`ai usage since tracking started:\n${lines.join('\n')}`);
+      }
+      return;
+    }
+
+    // ── Cancel a reminder (checked before calendar-create so "delete the
+    // reminder about X" doesn't get re-extracted as a new reminder) ──
+    if (CANCEL_REMINDER_PATTERN.test(content)) {
+      const result = cancelReminder(extractCancelQuery(content), message.author.id, isAdmin);
+      if (result.ok) {
+        await message.reply(`done, scrapped "${result.reminder.message}". one less thing to nag you about`);
+      } else if (result.reason === 'none') {
+        await message.reply("couldn't find a pending reminder matching that. try 'pip list reminders' to see what's actually set");
+      } else if (result.reason === 'ambiguous') {
+        const opts = (result.matches ?? []).slice(0, 5).map(r => `"${r.message}"`).join(', ');
+        await message.reply(`that matches more than one: ${opts}. be a bit more specific?`);
+      } else {
+        await message.reply("that's someone else's reminder — only they (or an admin) can cancel it");
+      }
+      aiService.recordActivity(message.channel.id);
+      return;
+    }
+
     if ('sendTyping' in message.channel) await message.channel.sendTyping();
 
-    // ── Intent: Calendar Read ─────────────────────
-    if (aiService.hasCalendarReadIntent(content)) {
-      logger.info({ content }, 'Calendar read intent detected');
-      const events = await calendarService.getUpcomingEvents(10);
-      logger.info({ eventCount: events.length, events: events.map((e: any) => e.summary) }, 'Calendar events fetched');
-      const embed = buildUpcomingEventsEmbed(events);
-
-      // Also get a conversational reply about the events
-      const eventSummary = events.length > 0
-        ? events.map((e: any) => {
-            const date = e.start?.date || e.start?.dateTime?.split('T')[0] || 'TBD';
-            return `${e.summary} on ${date}`;
-          }).join(', ')
-        : 'nothing';
-
-      const reply = await aiService.chat(
-        message.channel.id,
-        message.author.displayName,
-        `[CONTEXT: User asked about calendar. Upcoming events: ${eventSummary}. Respond naturally about what's coming up, don't list them all — the embed will show details.] ${content}`,
-      );
-
-      await message.reply({ content: reply, embeds: [embed] });
-      return;
+    // ── Intent: Stock-only (e.g. "what are we out of") ──
+    // Checked before POS/calendar so specific stock questions get fresh stock
+    // data — but never when the message is really a product update ("change the
+    // stock of X to 12") or a reminder ("remind me to restock"), which would
+    // otherwise be hijacked into a read-only stock report.
+    if (
+      posService.isConfigured() &&
+      aiService.hasStockIntent(content) &&
+      !aiService.hasPosIntent(content) &&
+      !aiService.hasProductCrudIntent(content) &&
+      !aiService.hasCalendarIntent(content)
+    ) {
+      logger.info({ content }, 'Stock-only intent detected');
+      try {
+        const stockText = await posService.buildLatestStockSummary();
+        const reply = await aiService.chat(
+          message.channel.id,
+          message.author.displayName,
+          content,
+          { context: `User asked about stock levels. Latest stock figures from the POS:\n${stockText}\nAnswer using these numbers. If the product they asked about isn't listed, say so. Keep it casual and in character.` },
+        );
+        await message.reply(reply);
+        aiService.recordActivity(message.channel.id);
+        return;
+      } catch (err) {
+        logger.error({ err }, 'Stock fetch failed');
+        await message.reply(pickLine(POS_FAIL_LINES));
+        aiService.recordActivity(message.channel.id);
+        return;
+      }
     }
 
     // ── Intent: POS / Stall Data ────────────────────
@@ -114,23 +240,20 @@ export async function execute(message: Message) {
           const reply = await aiService.chat(
             message.channel.id,
             message.author.displayName,
-            `[CONTEXT: User asked about POS sessions. Here is the data from the POS system:\n${summaryText}\nRespond naturally about the sessions — the embed shows the details. Keep it casual.] ${content}`,
+            content,
+            { context: `User asked about POS sessions. Data from the POS system:\n${summaryText}\nRespond naturally about the sessions — the embed shows the details. Keep it casual.` },
           );
 
           await message.reply({ content: reply, embeds: [embed] });
         } else {
-          // Try to find a specific session by name/number
+          // Try to find a specific session by stall number/name, default to most recent
           const sessions = await posService.getSessions();
-          const stallMatch = content.match(/stall\s*(\d+|[a-z]+)/i);
-          let targetSession = sessions[0]; // default: most recent
-          if (stallMatch) {
-            const found = sessions.find(s => s.name.toLowerCase().includes(stallMatch[0].toLowerCase()));
-            if (found) targetSession = found;
-          }
+          const targetSession = findStallSession(sessions, content) ?? sessions[0];
 
           const summaryText = targetSession
             ? await posService.buildSessionSummary(targetSession.id)
             : await posService.buildSessionSummary();
+          // Served from the POS response cache — no second network round trip
           const latestDetail = targetSession ? await posService.getSession(targetSession.id) : null;
 
           const embeds = [];
@@ -141,7 +264,8 @@ export async function execute(message: Message) {
           const reply = await aiService.chat(
             message.channel.id,
             message.author.displayName,
-            `[CONTEXT: User asked about POS/stall performance. Here is the data from the POS system:\n${summaryText}\nRespond naturally with insights about the numbers — highlight interesting stuff like best sellers, revenue, etc. The embed shows the key stats. Keep it casual and in character.] ${content}`,
+            content,
+            { context: `User asked about POS/stall performance. Data from the POS system:\n${summaryText}\nRespond naturally with insights about the numbers — highlight interesting stuff like best sellers and revenue. The embed shows the key stats. Keep it casual and in character.` },
           );
 
           await message.reply({ content: reply, embeds });
@@ -151,139 +275,204 @@ export async function execute(message: Message) {
         return;
       } catch (err) {
         logger.error({ err }, 'POS data fetch failed');
-        const reply = await aiService.chat(
-          message.channel.id,
-          message.author.displayName,
-          `[CONTEXT: User asked about POS data but the fetch failed. The POS system might be waking up (it's on Render free tier so it can take a minute to spin up). Let them know you tried but the POS is being slow, suggest trying again in a minute.] ${content}`,
-        );
-        await message.reply(reply);
+        await message.reply(pickLine(POS_FAIL_LINES));
         aiService.recordActivity(message.channel.id);
         return;
       }
+    }
+
+    // ── Intent: Calendar Read ─────────────────────
+    if (aiService.hasCalendarReadIntent(content)) {
+      logger.info({ content }, 'Calendar read intent detected');
+      let events;
+      try {
+        events = await calendarService.getUpcomingEvents(10);
+      } catch (err) {
+        logger.error({ err }, 'Calendar fetch failed');
+        await message.reply("couldn't reach google calendar just now. try again in a minute");
+        aiService.recordActivity(message.channel.id);
+        return;
+      }
+      logger.info({ eventCount: events.length }, 'Calendar events fetched');
+      const embeds = [buildUpcomingEventsEmbed(events)];
+
+      // Show pending reminders alongside the calendar — they're half the answer
+      // to "what's coming up"
+      const pending = getPendingReminders();
+      if (pending.length > 0) embeds.push(buildPendingRemindersEmbed(pending));
+
+      const eventSummary = events.length > 0
+        ? events.map((e: any) => {
+            const date = e.start?.date || e.start?.dateTime?.split('T')[0] || 'TBD';
+            return `${e.summary} on ${date}`;
+          }).join(', ')
+        : 'nothing';
+      const reminderSummary = pending.length > 0
+        ? ` Pending reminders: ${pending.slice(0, 5).map(r => r.message).join(', ')}.`
+        : '';
+
+      const reply = await aiService.chat(
+        message.channel.id,
+        message.author.displayName,
+        content,
+        { context: `User asked about the calendar. Upcoming events: ${eventSummary}.${reminderSummary} Respond naturally about what's coming up, don't list them all — the embeds show details.` },
+      );
+
+      await message.reply({ content: reply, embeds });
+      return;
     }
 
     // ── Intent: Google Sheets ─────────────────────
     if (aiService.hasSheetsIntent(content)) {
       const sheetData = await aiService.extractSheetData(content);
 
-      if (sheetData && sheetData.sheet) {
-        const url = await sheetsService.createSpreadsheet(sheetData.sheet);
-
-        if (url) {
-          const embed = buildSheetCreatedEmbed(sheetData.sheet.title, url, sheetData.sheet.rows.length);
-          await message.reply({ content: sheetData.reply, embeds: [embed] });
-        } else {
-          await message.reply("tried to make the sheet but something went wrong on google's end. classic google tbh");
-        }
+      if (!sheetData?.sheet) {
+        await message.reply("i tried to work out what you wanted in that sheet but couldn't parse it. give me the columns and rows a bit more explicitly?");
         aiService.recordActivity(message.channel.id);
         return;
       }
+
+      const url = await sheetsService.createSpreadsheet(sheetData.sheet);
+
+      if (url) {
+        const embed = buildSheetCreatedEmbed(sheetData.sheet.title, url, sheetData.sheet.rows.length);
+        await message.reply({ content: sheetData.reply, embeds: [embed] });
+      } else {
+        await message.reply("tried to make the sheet but something went wrong on google's end. classic google tbh");
+      }
+      aiService.recordActivity(message.channel.id);
+      return;
     }
 
     // ── Intent: Product CRUD ──────────────────────
     if (aiService.hasProductCrudIntent(content)) {
       const productData = await aiService.extractProductAction(content);
 
-      if (productData && productData.action) {
-        const { action } = productData;
-
-        switch (action.type) {
-          case 'create': {
-            const id = await db.createProduct(
-              action.name,
-              action.price || 0,
-              action.stock || 0,
-              action.description,
-            );
-
-            if (id) {
-              const embed = new EmbedBuilder()
-                .setColor(0x84a98c)
-                .setTitle('Product Created')
-                .addFields(
-                  { name: 'Name', value: action.name, inline: true },
-                  { name: 'Price', value: `£${(action.price || 0).toFixed(2)}`, inline: true },
-                  { name: 'Stock', value: `${action.stock || 0}`, inline: true },
-                )
-                .setTimestamp()
-                .setFooter({ text: 'Pip Shop Manager' });
-
-              if (action.description) embed.setDescription(action.description);
-              await message.reply({ content: productData.reply, embeds: [embed] });
-            } else {
-              await message.reply("couldn't create that product, database said no. might want to check the logs");
-            }
-            break;
-          }
-
-          case 'update': {
-            const product = await db.getProductByName(action.name);
-            if (!product) {
-              await message.reply(`couldn't find a product matching "${action.name}". double check the name?`);
-              break;
-            }
-
-            if (action.updates && Object.keys(action.updates).length > 0) {
-              const success = await db.updateProduct(product.id, action.updates);
-              if (success) {
-                const fields: string[] = [];
-                if (action.updates.price !== undefined) fields.push(`price → £${action.updates.price.toFixed(2)}`);
-                if (action.updates.stock !== undefined) fields.push(`stock → ${action.updates.stock}`);
-                if (action.updates.name) fields.push(`name → ${action.updates.name}`);
-                if (action.updates.description) fields.push(`description updated`);
-
-                const embed = new EmbedBuilder()
-                  .setColor(0xa3b18a)
-                  .setTitle('Product Updated')
-                  .setDescription(`**${product.name}**\n${fields.join('\n')}`)
-                  .setTimestamp()
-                  .setFooter({ text: 'Pip Shop Manager' });
-
-                await message.reply({ content: productData.reply, embeds: [embed] });
-              } else {
-                await message.reply("update failed, something went wrong with the database");
-              }
-            }
-            break;
-          }
-
-          case 'delete': {
-            // Permission check
-            if (!config.ADMIN_USER_IDS.includes(message.author.id)) {
-              await message.reply("nice try but you don't have delete permissions. only admins can do that one");
-              break;
-            }
-
-            const product = await db.getProductByName(action.name);
-            if (!product) {
-              await message.reply(`couldn't find a product matching "${action.name}". you sure about that name?`);
-              break;
-            }
-
-            const success = await db.deleteProduct(product.id);
-            if (success) {
-              const embed = new EmbedBuilder()
-                .setColor(0xef4444)
-                .setTitle('Product Deleted')
-                .setDescription(`**${product.name}** has been removed from the shop`)
-                .addFields(
-                  { name: 'Was priced at', value: `£${product.price.toFixed(2)}`, inline: true },
-                  { name: 'Had stock', value: `${product.stock}`, inline: true },
-                )
-                .setTimestamp()
-                .setFooter({ text: 'Pip Shop Manager' });
-
-              await message.reply({ content: productData.reply, embeds: [embed] });
-            } else {
-              await message.reply("delete failed. product might already be gone or the database is being weird");
-            }
-            break;
-          }
-        }
-
+      if (!productData?.action) {
+        await message.reply("couldn't work out exactly what product change you want. tell me the product name and what to do with it");
         aiService.recordActivity(message.channel.id);
         return;
       }
+
+      const { action } = productData;
+
+      switch (action.type) {
+        case 'create': {
+          const id = await db.createProduct(
+            action.name,
+            action.price || 0,
+            action.stock || 0,
+            action.description,
+          );
+
+          if (id) {
+            const embed = new EmbedBuilder()
+              .setColor(0x84a98c)
+              .setTitle('Product Created')
+              .addFields(
+                { name: 'Name', value: action.name, inline: true },
+                { name: 'Price', value: `£${Number(action.price || 0).toFixed(2)}`, inline: true },
+                { name: 'Stock', value: `${action.stock || 0}`, inline: true },
+              )
+              .setTimestamp()
+              .setFooter({ text: 'Pip Shop Manager' });
+
+            if (action.description) embed.setDescription(action.description);
+            await message.reply({ content: productData.reply, embeds: [embed] });
+          } else {
+            await message.reply("couldn't create that product, database said no. might want to check the logs");
+          }
+          break;
+        }
+
+        case 'update': {
+          const product = await db.getProductByName(action.name);
+          if (!product) {
+            await message.reply(`couldn't find a product matching "${action.name}". double check the name?`);
+            break;
+          }
+
+          if (action.updates && Object.keys(action.updates).length > 0) {
+            const success = await db.updateProduct(product.id, action.updates);
+            if (success) {
+              const fields: string[] = [];
+              if (action.updates.price !== undefined) fields.push(`price → £${Number(action.updates.price).toFixed(2)}`);
+              if (action.updates.stock !== undefined) fields.push(`stock → ${action.updates.stock}`);
+              if (action.updates.name) fields.push(`name → ${action.updates.name}`);
+              if (action.updates.description) fields.push(`description updated`);
+
+              const embed = new EmbedBuilder()
+                .setColor(0xa3b18a)
+                .setTitle('Product Updated')
+                .setDescription(`**${product.name}**\n${fields.join('\n')}`)
+                .setTimestamp()
+                .setFooter({ text: 'Pip Shop Manager' });
+
+              await message.reply({ content: productData.reply, embeds: [embed] });
+            } else {
+              await message.reply("update failed, something went wrong with the database");
+            }
+          }
+          break;
+        }
+
+        case 'delete': {
+          // Permission check
+          if (!isAdmin) {
+            await message.reply("nice try but you don't have delete permissions. only admins can do that one");
+            break;
+          }
+
+          const product = await db.getProductByName(action.name);
+          if (!product) {
+            await message.reply(`couldn't find a product matching "${action.name}". you sure about that name?`);
+            break;
+          }
+
+          const success = await db.deleteProduct(product.id);
+          if (success) {
+            const embed = new EmbedBuilder()
+              .setColor(0xef4444)
+              .setTitle('Product Deleted')
+              .setDescription(`**${product.name}** has been removed from the shop`)
+              .addFields(
+                { name: 'Was priced at', value: `£${Number(product.price).toFixed(2)}`, inline: true },
+                { name: 'Had stock', value: `${product.stock}`, inline: true },
+              )
+              .setTimestamp()
+              .setFooter({ text: 'Pip Shop Manager' });
+
+            await message.reply({ content: productData.reply, embeds: [embed] });
+          } else {
+            await message.reply("delete failed. product might already be gone or the database is being weird");
+          }
+          break;
+        }
+      }
+
+      aiService.recordActivity(message.channel.id);
+      return;
+    }
+
+    // ── Relative reminder ("remind me in 20 mins to...") — deterministic, no LLM ──
+    const relative = parseRelativeReminder(content);
+    if (relative) {
+      addReminder({
+        id: randomUUID(),
+        channelId: message.channel.id,
+        createdBy: message.author.displayName,
+        createdById: message.author.id,
+        message: relative.task,
+        dueAt: relative.dueAt.toISOString(),
+        notified: false,
+      });
+      const when = relative.dueAt.toLocaleString('en-GB', {
+        timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit',
+        ...(relative.dueAt.getTime() - Date.now() > 86400000 ? { weekday: 'short', day: 'numeric', month: 'short' } : {}),
+      });
+      await message.reply(`sorted, i'll ping you at ${when} about "${relative.task}". consider it handled`);
+      aiService.recordActivity(message.channel.id);
+      return;
     }
 
     // ── Intent: Calendar Create (with optional checklist) ──
@@ -291,44 +480,72 @@ export async function execute(message: Message) {
       const calData = await aiService.extractCalendarData(content);
 
       if (calData && (calData.events.length > 0 || calData.reminders.length > 0)) {
+        const failures: string[] = [];
+
         for (const event of calData.events) {
           const eventId = await calendarService.createEvent(event.summary, event.date, {
             allDay: event.allDay,
             time: event.time || undefined,
             checklist: event.checklist || undefined,
           });
+          if (!eventId) failures.push(event.summary);
 
-          addReminder({
-            id: randomUUID(),
-            channelId: message.channel.id,
-            createdBy: message.author.displayName,
-            message: `Event today: ${event.summary}`,
-            dueAt: `${event.date}T09:00:00.000Z`,
-            calendarEventId: eventId || undefined,
-            notified: false,
-          });
+          // The local Discord reminder is kept even when Google rejected the
+          // event — it's the part that still works without the calendar.
+          // Reminder fires at the event time if given, otherwise 9am local
+          // (parsing without a Z suffix uses this machine's Europe/London time).
+          const dueAt = reminderDueAt(event.date, event.time);
+          if (dueAt) {
+            addReminder({
+              id: randomUUID(),
+              channelId: message.channel.id,
+              createdBy: message.author.displayName,
+              createdById: message.author.id,
+              message: `Event today: ${event.summary}`,
+              dueAt,
+              calendarEventId: eventId || undefined,
+              notified: false,
+            });
+          }
         }
 
         for (const rem of calData.reminders) {
+          const dueAt = reminderDueAt(rem.dueDate, rem.time);
+          if (!dueAt) {
+            failures.push(rem.message);
+            continue;
+          }
+
           addReminder({
             id: randomUUID(),
             channelId: message.channel.id,
             createdBy: message.author.displayName,
+            createdById: message.author.id,
             message: rem.message,
-            dueAt: `${rem.dueDate}T09:00:00.000Z`,
+            dueAt,
             notified: false,
           });
 
-          await calendarService.createEvent(rem.message, rem.dueDate, {
+          const created = await calendarService.createEvent(rem.message, rem.dueDate, {
             allDay: true,
             description: `Reminder set by ${message.author.displayName}`,
           });
+          if (!created) failures.push(rem.message);
         }
 
-        await message.reply({
-          content: calData.reply,
-          embeds: [buildCalendarConfirmEmbed(calData)],
-        });
+        if (failures.length > 0 && failures.length === calData.events.length + calData.reminders.length) {
+          await message.reply("tried to add that to the calendar but google rejected it. worth checking the calendar setup, i'll keep the reminder side running here");
+        } else if (failures.length > 0) {
+          await message.reply({
+            content: `${calData.reply}\n(heads up: couldn't add ${failures.map(f => `"${f}"`).join(', ')} to google calendar — check the logs)`,
+            embeds: [buildCalendarConfirmEmbed(calData)],
+          });
+        } else {
+          await message.reply({
+            content: calData.reply,
+            embeds: [buildCalendarConfirmEmbed(calData)],
+          });
+        }
         aiService.recordActivity(message.channel.id);
         return;
       }

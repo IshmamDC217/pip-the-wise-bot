@@ -30,6 +30,9 @@ export interface Reminder {
   id: string;
   channelId: string;
   createdBy: string;
+  // Discord user ID so the reminder can @mention its creator when it fires
+  // (optional: reminders saved before this field existed don't have it)
+  createdById?: string;
   message: string;
   dueAt: string;
   calendarEventId?: string;
@@ -46,7 +49,7 @@ export interface CalendarEventData {
 
 export interface CalendarExtraction {
   events: CalendarEventData[];
-  reminders: { message: string; dueDate: string }[];
+  reminders: { message: string; dueDate: string; time?: string | null }[];
   reply: string;
 }
 

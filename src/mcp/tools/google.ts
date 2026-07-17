@@ -2,12 +2,15 @@
  * Google MCP Tools — Calendar events, Sheets creation
  */
 import { google } from 'googleapis';
+import { parseServiceAccountJson } from '../../utils/google-sa.js';
 
 function createAuth() {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT;
   if (!raw) return null;
   try {
-    const credentials = JSON.parse(Buffer.from(raw, 'base64').toString('utf-8'));
+    // Shared parser handles the literal newlines in private_key; a raw
+    // JSON.parse rejects the credential and silently disabled every Google tool
+    const credentials = parseServiceAccountJson(raw);
     return new google.auth.GoogleAuth({
       credentials,
       scopes: [

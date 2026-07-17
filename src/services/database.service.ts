@@ -11,7 +11,10 @@ const pool = mysql.createPool({
   database: config.DB_NAME,
   waitForConnections: true,
   connectionLimit: 3,
-  queueLimit: 0,
+  queueLimit: 10,
+  connectTimeout: 10000,
+  // DECIMAL columns come back as strings otherwise, which crashes .toFixed()
+  decimalNumbers: true,
 });
 
 export const db = {
@@ -75,11 +78,21 @@ export const db = {
   },
 
   async isConnected(): Promise<boolean> {
+    const result = await this.checkConnection();
+    return result.ok;
+  },
+
+  /**
+   * Like isConnected but surfaces WHY the connection failed. A rejected password
+   * (ER_ACCESS_DENIED_ERROR) must be distinguishable from a network outage —
+   * the former sat masked as "unreachable" for four months.
+   */
+  async checkConnection(): Promise<{ ok: boolean; code?: string; message?: string }> {
     try {
       await pool.query('SELECT 1');
-      return true;
-    } catch {
-      return false;
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, code: err?.code ?? 'UNKNOWN', message: err?.message };
     }
   },
 

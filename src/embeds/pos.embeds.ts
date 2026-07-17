@@ -3,6 +3,12 @@ import { EmbedBuilder } from 'discord.js';
 const FORGE_ORANGE = 0xe07a2f;
 const FORGE_GREEN = 0x84a98c;
 
+// The POS API returns full ISO timestamps; show a plain en-GB date instead.
+function formatDate(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString('en-GB');
+}
+
 interface SessionStats {
   name: string;
   date: string;
@@ -24,7 +30,7 @@ export function buildSessionStatsEmbed(session: SessionStats): EmbedBuilder {
     .setColor(color)
     .setTitle(`Stall: ${session.name}`)
     .addFields(
-      { name: 'Date', value: session.date, inline: true },
+      { name: 'Date', value: formatDate(session.date), inline: true },
       { name: 'Status', value: session.status === 'active' ? 'Live' : 'Closed', inline: true },
       { name: '\u200b', value: '\u200b', inline: true },
       { name: 'Revenue', value: `£${revenue}`, inline: true },
@@ -69,7 +75,7 @@ export function buildSessionsOverviewEmbed(sessions: SessionOverview[]): EmbedBu
     const status = s.status === 'active' ? ' (Live)' : '';
     embed.addFields({
       name: `${s.name}${status}`,
-      value: `${s.date}${loc}\n${rev} revenue · ${units} units`,
+      value: `${formatDate(s.date)}${loc}\n${rev} revenue · ${units} units`,
     });
   }
 

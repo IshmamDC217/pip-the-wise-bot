@@ -1,6 +1,6 @@
 import { Client, TextChannel } from 'discord.js';
 import { config } from '../config.js';
-import { loadState, saveState } from '../utils/state.js';
+import { loadState, updateState } from '../utils/state.js';
 import { logger } from '../utils/logger.js';
 
 const USERS = ['447033110773628930', '535658393562775562']; // Tobi, Ishmam
@@ -16,12 +16,13 @@ const nudges = [
 
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // Check every hour if a nudge is due
 
-export function startCalendarNudgeMonitor(client: Client) {
+export function startCalendarNudgeMonitor(client: Client): NodeJS.Timeout[] {
   logger.info(`Calendar nudge monitor started (nudge interval: ${config.NUDGE_INTERVAL_MS / 86400000}d, checking hourly)`);
 
   // Check immediately on startup, then every hour
-  setTimeout(() => checkAndNudge(client), 10_000); // 10s after boot to let things settle
-  setInterval(() => checkAndNudge(client), CHECK_INTERVAL_MS);
+  const initial = setTimeout(() => checkAndNudge(client), 10_000); // 10s after boot to let things settle
+  const interval = setInterval(() => checkAndNudge(client), CHECK_INTERVAL_MS);
+  return [initial, interval];
 }
 
 async function checkAndNudge(client: Client) {
@@ -29,10 +30,15 @@ async function checkAndNudge(client: Client) {
     const state = loadState();
     const now = Date.now();
 
-    // If we've never nudged, or enough time has passed since last nudge
-    const lastNudge = state.lastNudgeAt ? new Date(state.lastNudgeAt).getTime() : now;
-    const elapsed = now - lastNudge;
+    // First run with no recorded nudge: seed the timer so the first nudge fires
+    // one interval from now (defaulting to "now" without persisting meant the
+    // elapsed time never accumulated and the nudge never fired).
+    if (!state.lastNudgeAt) {
+      updateState({ lastNudgeAt: new Date().toISOString() });
+      return;
+    }
 
+    const elapsed = now - new Date(state.lastNudgeAt).getTime();
     if (elapsed < config.NUDGE_INTERVAL_MS) return;
 
     const channel = client.channels.cache.get(config.CHANNEL_GENERAL) as TextChannel;
@@ -42,9 +48,8 @@ async function checkAndNudge(client: Client) {
     const msg = nudges[Math.floor(Math.random() * nudges.length)].replace('{user}', `<@${userId}>`);
     await channel.send(msg);
 
-    // Persist the nudge time
-    state.lastNudgeAt = new Date().toISOString();
-    saveState(state);
+    // Persist the nudge time (merge-write so other monitors' state survives)
+    updateState({ lastNudgeAt: new Date().toISOString() });
 
     logger.info({ userId }, 'Calendar nudge sent');
   } catch (err) {

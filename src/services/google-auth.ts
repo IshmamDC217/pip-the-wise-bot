@@ -2,15 +2,13 @@ import { google } from 'googleapis';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 
+import { parseServiceAccountJson } from '../utils/google-sa.js';
+
 function createAuth() {
   if (!config.GOOGLE_SERVICE_ACCOUNT) return null;
 
   try {
-    const raw = Buffer.from(config.GOOGLE_SERVICE_ACCOUNT, 'base64').toString('utf-8');
-    const cleaned = raw.replace(/[\x00-\x1f\x7f]/g, (ch) =>
-      ch === '\n' || ch === '\r' || ch === '\t' ? ch : '',
-    );
-    const credentials = JSON.parse(cleaned);
+    const credentials = parseServiceAccountJson(config.GOOGLE_SERVICE_ACCOUNT);
 
     return new google.auth.GoogleAuth({
       credentials,

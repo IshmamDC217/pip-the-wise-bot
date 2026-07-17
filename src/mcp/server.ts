@@ -8,7 +8,8 @@
  *   - Gmail: check important emails
  *   - Google: Calendar events, Sheets creation
  */
-import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+import 'dotenv/config';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { posTools } from './tools/pos.js';

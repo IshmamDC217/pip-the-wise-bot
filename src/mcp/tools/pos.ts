@@ -2,7 +2,7 @@
  * POS MCP Tools — wraps the ForgeRealm POS REST API
  */
 
-const POS_URL = process.env.POS_API_URL || 'https://forgerealm-pos.onrender.com';
+const POS_URL = process.env.POS_API_URL || 'https://forgerealmpos.netlify.app';
 const POS_USER = process.env.POS_USERNAME || '';
 const POS_PASS = process.env.POS_PASSWORD || '';
 

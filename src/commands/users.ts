@@ -8,10 +8,16 @@ export const data = new SlashCommandBuilder()
 export async function execute(interaction: ChatInputCommandInteraction) {
   await interaction.deferReply();
 
+  // Degrade like /status and /stats do when the database is unreachable
   const [userCount, recentUsers] = await Promise.all([
-    db.getUserCount(),
-    db.getRecentUsers(5),
+    db.getUserCount().catch(() => null),
+    db.getRecentUsers(5).catch(() => [] as Awaited<ReturnType<typeof db.getRecentUsers>>),
   ]);
+
+  if (userCount === null) {
+    await interaction.editReply('Database is unavailable right now — user stats will be back once it reconnects.');
+    return;
+  }
 
   const recentList =
     recentUsers.length > 0

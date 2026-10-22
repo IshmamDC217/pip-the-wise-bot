@@ -23,7 +23,7 @@ The script self-elevates (UAC prompt). It installs the service with:
 
 - **Start type:** Automatic (boots with Windows, before login)
 - **Restart on exit:** yes, with a 5s delay (prevents crash-loop thrash)
-- **Logs:** `logs/stdout.log` + `logs/stderr.log`, rotated at 10 MB
+- **Logs:** `logs/stdout.log` + `logs/stderr.log`, rotated at 10 MB while the service runs (online rotation)
 
 Re-running the script reconfigures and restarts an existing service, so it's
 safe to run after every deploy.
@@ -36,11 +36,12 @@ npm run service:uninstall
 
 ## Operate
 
-Day-to-day you don't need NSSM — Windows' own tools work:
+Day-to-day you don't need NSSM. Windows' own tools work:
 
 ```powershell
-# Live-tail logs
+# Live-tail logs (stdout; use service:logs:err for the crash/error log)
 npm run service:logs
+npm run service:logs:err
 
 # Restart / stop / start (needs admin shell)
 Restart-Service ForgeRealmPip
@@ -60,4 +61,4 @@ npm run build
 Restart-Service ForgeRealmPip
 ```
 
-Or just `npm run service:install` again — it reconfigures and restarts.
+Or just `npm run service:install` again; it reconfigures and restarts.

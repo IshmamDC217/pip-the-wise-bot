@@ -1,5 +1,6 @@
 import { google } from 'googleapis';
 import { googleAuth } from './google-auth.js';
+import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import type { SheetData } from '../types.js';
 
@@ -167,6 +168,21 @@ export const sheetsService = {
         fileId: spreadsheetId,
         requestBody: { role: 'reader', type: 'anyone' },
       });
+
+      // The sheet is owned by the service account, so without this nobody on the
+      // team could edit it (or find it in their Drive). Grant the ForgeRealm
+      // account editor access; failure here shouldn't fail the whole creation.
+      if (config.GOOGLE_CALENDAR_ID.includes('@')) {
+        try {
+          await drive.permissions.create({
+            fileId: spreadsheetId,
+            sendNotificationEmail: false,
+            requestBody: { role: 'writer', type: 'user', emailAddress: config.GOOGLE_CALENDAR_ID },
+          });
+        } catch (err) {
+          logger.warn({ err }, 'Could not grant editor access on new spreadsheet');
+        }
+      }
 
       const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}`;
       logger.info({ title: data.title, url }, 'Spreadsheet created');

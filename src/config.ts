@@ -20,13 +20,14 @@ export const config = {
   CHANNEL_SHOP: required('CHANNEL_SHOP'),
   CHANNEL_WEBSITE: required('CHANNEL_WEBSITE'),
   CHANNEL_GENERAL: required('CHANNEL_GENERAL'),
+  CHANNEL_API_HEALTH: required('CHANNEL_API_HEALTH'),
 
   // ForgeRealm
   FORGEREALM_API_URL: optional('FORGEREALM_API_URL', 'https://api.forgerealm.co.uk'),
   FORGEREALM_SITE_URL: optional('FORGEREALM_SITE_URL', 'https://forgerealm.co.uk'),
 
   // ForgeRealm POS
-  POS_URL: optional('POS_API_URL', 'https://forgerealm-pos.onrender.com'),
+  POS_URL: optional('POS_API_URL', 'https://forgerealmpos.netlify.app'),
   POS_USERNAME: optional('POS_USERNAME', ''),
   POS_PASSWORD: optional('POS_PASSWORD', ''),
 
@@ -39,6 +40,10 @@ export const config = {
 
   // Groq
   GROQ_API_KEY: required('GROQ_API_KEY'),
+  // Persona chat runs on the big model; relevance checks and JSON extractions run
+  // on the small one, which has its own (larger) free-tier rate-limit pool.
+  GROQ_CHAT_MODEL: optional('GROQ_CHAT_MODEL', 'llama-3.3-70b-versatile'),
+  GROQ_UTILITY_MODEL: optional('GROQ_UTILITY_MODEL', 'llama-3.1-8b-instant'),
 
   // Google (Calendar + Sheets share the same service account)
   GOOGLE_SERVICE_ACCOUNT: optional('GOOGLE_SERVICE_ACCOUNT', ''),

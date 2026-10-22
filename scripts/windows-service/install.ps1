@@ -13,8 +13,31 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administra
     $passthru = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"")
     if ($ServiceName -ne 'ForgeRealmPip') { $passthru += @('-ServiceName',$ServiceName) }
     if ($NssmPath)                        { $passthru += @('-NssmPath',$NssmPath) }
-    Start-Process powershell -ArgumentList $passthru -Verb RunAs
-    exit
+    $elevated = Start-Process powershell -ArgumentList $passthru -Verb RunAs -Wait -PassThru
+    exit $elevated.ExitCode
+}
+
+# Best-effort transcript so failures are diagnosable if the window closed
+# from an auto-elevation. Skip silently if transcription is already active
+# (e.g. enforced by group policy, or a stale session).
+$repoRootEarly = Resolve-Path (Join-Path $PSScriptRoot '..\..')
+$logsDirEarly = Join-Path $repoRootEarly 'logs'
+New-Item -ItemType Directory -Force -Path $logsDirEarly | Out-Null
+$installLog = Join-Path $logsDirEarly 'service-install.log'
+$transcriptActive = $false
+try {
+    Start-Transcript -Path $installLog -Force -ErrorAction Stop | Out-Null
+    $transcriptActive = $true
+} catch {
+    Write-Host "(Transcript not started: $($_.Exception.Message))" -ForegroundColor DarkGray
+}
+trap {
+    Write-Host ''
+    Write-Host ('ERROR: ' + $_.Exception.Message) -ForegroundColor Red
+    Write-Host ''
+    if ($transcriptActive) { try { Stop-Transcript | Out-Null } catch {} }
+    if ([Environment]::UserInteractive) { Read-Host 'Press Enter to close' }
+    exit 1
 }
 
 $repoRoot   = Resolve-Path (Join-Path $PSScriptRoot '..\..')
@@ -35,12 +58,14 @@ $nodePath = $node.Source
 
 if (-not $NssmPath) {
     $candidates = @(
-        $env:NSSM,
-        (Get-Command nssm -ErrorAction SilentlyContinue | ForEach-Object Source),
-        'A:\Claude\nssm.exe',
-        'C:\ProgramData\chocolatey\bin\nssm.exe'
-    ) | Where-Object { $_ -and (Test-Path $_) }
-    if (-not $candidates -or $candidates.Count -eq 0) {
+        @(
+            $env:NSSM,
+            (Get-Command nssm -ErrorAction SilentlyContinue | ForEach-Object Source),
+            'A:\Claude\nssm.exe',
+            'C:\ProgramData\chocolatey\bin\nssm.exe'
+        ) | Where-Object { $_ -and (Test-Path $_) }
+    )
+    if ($candidates.Count -eq 0) {
         throw "nssm.exe not found. Download from https://nssm.cc/download, drop nssm.exe somewhere on PATH (or pass -NssmPath)."
     }
     $NssmPath = $candidates[0]
@@ -55,7 +80,7 @@ New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
 
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {
-    Write-Host "Service already exists — stopping and reconfiguring..."
+    Write-Host 'Service already exists - stopping and reconfiguring...'
     & $NssmPath stop $ServiceName | Out-Null
 } else {
     Write-Host "Installing service..."
@@ -71,6 +96,7 @@ if ($existing) {
 & $NssmPath set $ServiceName AppStdout        (Join-Path $logsDir 'stdout.log')          | Out-Null
 & $NssmPath set $ServiceName AppStderr        (Join-Path $logsDir 'stderr.log')          | Out-Null
 & $NssmPath set $ServiceName AppRotateFiles   1                                          | Out-Null
+& $NssmPath set $ServiceName AppRotateOnline  1                                          | Out-Null
 & $NssmPath set $ServiceName AppRotateBytes   10485760                                   | Out-Null
 & $NssmPath set $ServiceName AppExit          Default Restart                            | Out-Null
 & $NssmPath set $ServiceName AppRestartDelay  5000                                       | Out-Null
@@ -82,3 +108,5 @@ Write-Host ''
 Write-Host "Service '$ServiceName' is installed, set to auto-start on boot, and running."
 Write-Host "Logs:   $logsDir"
 Write-Host "Manage: services.msc or 'nssm restart|stop|edit|status $ServiceName'"
+if ($transcriptActive) { try { Stop-Transcript | Out-Null } catch {} }
+if ([Environment]::UserInteractive) { Read-Host 'Press Enter to close' }

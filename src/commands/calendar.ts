@@ -10,8 +10,19 @@ export const data = new SlashCommandBuilder()
 export async function execute(interaction: ChatInputCommandInteraction) {
   await interaction.deferReply();
 
-  const events = await calendarService.getUpcomingEvents(10);
   const reminders = getPendingReminders();
+
+  // A failed Google fetch must read differently from a genuinely empty calendar
+  let events;
+  try {
+    events = await calendarService.getUpcomingEvents(10);
+  } catch {
+    await interaction.editReply({
+      content: "Couldn't reach Google Calendar — showing reminders only.",
+      embeds: [buildPendingRemindersEmbed(reminders)],
+    });
+    return;
+  }
 
   const embeds = [
     buildUpcomingEventsEmbed(events),

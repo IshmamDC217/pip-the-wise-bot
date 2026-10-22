@@ -5,6 +5,24 @@ import { logger } from '../utils/logger.js';
 
 const calendar = googleAuth ? google.calendar({ version: 'v3', auth: googleAuth }) : null;
 
+// UTC-safe: parsing "date + 'T00:00:00'" without a Z uses LOCAL time, so during
+// BST the ISO round trip lost an hour and the exclusive end date collapsed onto
+// the start date, which Google rejects — all-day events failed all summer.
+function nextDay(date: string): string {
+  return new Date(new Date(`${date}T00:00:00Z`).getTime() + 86400000).toISOString().split('T')[0];
+}
+
+// Build start/end for a timed event, rolling the date when the +1h end crosses
+// midnight (a 23:30 event must not end at 00:30 the same day).
+function timedRange(date: string, time: string): { start: string; end: string } {
+  const start = new Date(`${date}T${time}:00Z`);
+  const end = new Date(start.getTime() + 3600000);
+  const fmt = (d: Date) => d.toISOString().slice(0, 19);
+  // These strings carry no Z and are paired with timeZone: 'Europe/London',
+  // so the wall-clock time the user asked for is preserved.
+  return { start: fmt(start), end: fmt(end) };
+}
+
 export const calendarService = {
   isConfigured(): boolean {
     return !!calendar && !!config.GOOGLE_CALENDAR_ID;
@@ -31,20 +49,12 @@ export const calendarService = {
 
       if (options.allDay || !options.time) {
         // Google requires end date = start + 1 day for all-day events
-        const endDate = new Date(date + 'T00:00:00');
-        endDate.setDate(endDate.getDate() + 1);
-        const endDateStr = endDate.toISOString().split('T')[0];
         event.start = { date };
-        event.end = { date: endDateStr };
+        event.end = { date: nextDay(date) };
       } else {
-        const dateTime = `${date}T${options.time}:00`;
-        // Keep end time in the same format as start (not ISO/UTC)
-        const [hours, minutes] = options.time.split(':').map(Number);
-        const endHour = String((hours + 1) % 24).padStart(2, '0');
-        const endTime = `${endHour}:${String(minutes).padStart(2, '0')}`;
-        const endDateTime = `${date}T${endTime}:00`;
-        event.start = { dateTime, timeZone: 'Europe/London' };
-        event.end = { dateTime: endDateTime, timeZone: 'Europe/London' };
+        const range = timedRange(date, options.time);
+        event.start = { dateTime: range.start, timeZone: 'Europe/London' };
+        event.end = { dateTime: range.end, timeZone: 'Europe/London' };
       }
 
       event.reminders = {
@@ -86,15 +96,12 @@ export const calendarService = {
       if (updates.description !== undefined) body.description = updates.description;
       if (updates.date) {
         if (updates.time) {
-          const dateTime = `${updates.date}T${updates.time}:00`;
-          body.start = { dateTime, timeZone: 'Europe/London' };
-          body.end = {
-            dateTime: new Date(new Date(dateTime).getTime() + 3600000).toISOString(),
-            timeZone: 'Europe/London',
-          };
+          const range = timedRange(updates.date, updates.time);
+          body.start = { dateTime: range.start, timeZone: 'Europe/London' };
+          body.end = { dateTime: range.end, timeZone: 'Europe/London' };
         } else {
           body.start = { date: updates.date };
-          body.end = { date: updates.date };
+          body.end = { date: nextDay(updates.date) };
         }
       }
 
@@ -110,6 +117,11 @@ export const calendarService = {
     }
   },
 
+  /**
+   * Throws on API/auth errors so callers can tell "calendar is empty" apart from
+   * "couldn't reach the calendar" (swallowing errors made failures look like a
+   * clear schedule). Returns [] only when unconfigured or genuinely empty.
+   */
   async getUpcomingEvents(maxResults = 10): Promise<any[]> {
     if (!calendar) return [];
 
@@ -125,7 +137,7 @@ export const calendarService = {
       return res.data.items || [];
     } catch (err) {
       logger.error({ err }, 'Failed to fetch calendar events');
-      return [];
+      throw err;
     }
   },
 

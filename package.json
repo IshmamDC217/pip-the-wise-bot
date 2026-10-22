@@ -13,17 +13,18 @@
     "mcp": "tsx src/mcp/server.ts",
     "service:install": "npm run build && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-service/install.ps1",
     "service:uninstall": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-service/uninstall.ps1",
-    "service:logs": "powershell -NoProfile -Command \"Get-Content -Path logs/stdout.log,logs/stderr.log -Tail 50 -Wait\""
+    "service:logs": "powershell -NoProfile -Command \"Get-Content -Path logs/stdout.log -Tail 50 -Wait\"",
+    "service:logs:err": "powershell -NoProfile -Command \"Get-Content -Path logs/stderr.log -Tail 50 -Wait\""
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.79.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.7",
     "googleapis": "^171.4.0",
     "mysql2": "^3.11.0",
     "pino": "^9.6.0",
-    "pino-pretty": "^13.0.0"
+    "pino-pretty": "^13.0.0",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/node": "^22.13.0",

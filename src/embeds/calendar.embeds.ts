@@ -38,7 +38,7 @@ export function buildCalendarConfirmEmbed(data: CalendarExtraction): EmbedBuilde
 
   if (data.reminders.length > 0) {
     const reminderLines = data.reminders
-      .map((r) => `${r.message} — ${formatDate(r.dueDate)}`)
+      .map((r) => `${r.message} — ${formatDate(r.dueDate)}${r.time ? ` at ${r.time}` : ''}`)
       .join('\n');
     embed.addFields({ name: 'Reminders', value: reminderLines });
   }
@@ -80,19 +80,33 @@ export function buildPendingRemindersEmbed(reminders: Reminder[]): EmbedBuilder 
     return embed;
   }
 
-  const lines = reminders.map((r) => `${r.message} — ${formatDate(r.dueAt.split('T')[0])} (by ${r.createdBy})`);
-  embed.setDescription(lines.join('\n'));
+  // Cap the list — an unbounded join eventually exceeds the 4096-char
+  // description limit and the whole /calendar command starts failing.
+  const MAX_LISTED = 15;
+  const lines = reminders
+    .slice(0, MAX_LISTED)
+    .map((r) => {
+      const due = new Date(r.dueAt);
+      const time = Number.isNaN(due.getTime())
+        ? ''
+        : ` ${due.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+      return `${r.message} — ${formatDate(r.dueAt.split('T')[0])}${time} (by ${r.createdBy})`;
+    });
+  if (reminders.length > MAX_LISTED) {
+    lines.push(`...and ${reminders.length - MAX_LISTED} more`);
+  }
+  embed.setDescription(lines.join('\n').slice(0, 4096));
   return embed;
 }
 
 function formatDate(dateStr: string): string {
-  try {
-    return new Date(dateStr).toLocaleDateString('en-GB', {
-      weekday: 'short',
-      day: 'numeric',
-      month: 'short',
-    });
-  } catch {
-    return dateStr;
-  }
+  // new Date('garbage') doesn't throw — it yields Invalid Date, which would
+  // render as the literal string "Invalid Date" in the embed.
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString('en-GB', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+  });
 }

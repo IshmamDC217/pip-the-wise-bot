@@ -1,8 +1,8 @@
-import { createServer } from 'node:http';
 import { Client, GatewayIntentBits } from 'discord.js';
 import { config } from './config.js';
 import { logger } from './utils/logger.js';
 import { loadCommands } from './commands/index.js';
+import { stopAllMonitors } from './utils/lifecycle.js';
 
 // Import events
 import * as ready from './events/ready.js';
@@ -27,30 +27,55 @@ if (ready.once) {
 client.on(interactionCreate.name, (...args) => interactionCreate.execute(...(args as [any])));
 client.on(messageCreate.name, (...args) => messageCreate.execute(...(args as [any])));
 
+client.on('error', (err) => logger.error({ err }, 'Discord client error'));
+client.on('shardError', (err) => logger.error({ err }, 'Discord shard error'));
+
 // Graceful shutdown
-process.on('SIGINT', () => {
-  logger.info('Shutting down...');
-  client.destroy();
+async function shutdown(signal: string) {
+  logger.info({ signal }, 'Shutting down...');
+  try {
+    stopAllMonitors();
+    await client.destroy();
+  } catch (err) {
+    logger.error({ err }, 'Error during shutdown');
+  }
   process.exit(0);
+}
+
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+
+// A stray rejection (failed reply, ws hiccup) must not kill the process — the old
+// behavior turned every network blip into an NSSM crash-restart loop (the logs
+// show thousands of 10-second boot cycles). Log it and keep running.
+process.on('unhandledRejection', (reason) => {
+  logger.error({ err: reason }, 'Unhandled promise rejection (continuing)');
 });
 
-process.on('SIGTERM', () => {
-  logger.info('Shutting down...');
-  client.destroy();
-  process.exit(0);
+process.on('uncaughtException', (err) => {
+  logger.error({ err }, 'Uncaught exception — exiting for service restart');
+  process.exit(1);
 });
 
-// Health server for Render (free tier requires an open port)
-const PORT = parseInt(process.env.PORT || '10000');
-createServer((_req, res) => {
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
-}).listen(PORT, () => logger.info({ port: PORT }, 'Health server listening'));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Start
+// Start. Login failures (DNS not up yet at boot, Discord blip) retry in-process
+// with capped backoff instead of exiting — re-logging in every 5 seconds via NSSM
+// risks Discord anti-abuse throttling of the token.
 async function main() {
   await loadCommands(client);
-  await client.login(config.DISCORD_TOKEN);
+
+  let delay = 5000;
+  for (;;) {
+    try {
+      await client.login(config.DISCORD_TOKEN);
+      return;
+    } catch (err) {
+      logger.error({ err, retryInMs: delay }, 'Discord login failed, retrying');
+      await sleep(delay);
+      delay = Math.min(delay * 2, 5 * 60 * 1000);
+    }
+  }
 }
 
 main().catch((err) => {

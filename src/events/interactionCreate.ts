@@ -1,4 +1,4 @@
-import { Events, type Interaction, Collection } from 'discord.js';
+import { Events, MessageFlags, type Interaction, Collection } from 'discord.js';
 import { logger } from '../utils/logger.js';
 import type { Command } from '../types.js';
 
@@ -20,11 +20,17 @@ export async function execute(interaction: Interaction) {
     await command.execute(interaction);
   } catch (error) {
     logger.error({ error }, `Command failed: ${interaction.commandName}`);
-    const reply = { content: 'Something went wrong.', ephemeral: true };
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp(reply);
-    } else {
-      await interaction.reply(reply);
+    // The error reply itself can fail (expired interaction token, 10062 Unknown
+    // interaction); that must never escape as an unhandled rejection.
+    try {
+      const reply = { content: 'Something went wrong.', flags: MessageFlags.Ephemeral } as const;
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp(reply);
+      } else {
+        await interaction.reply(reply);
+      }
+    } catch (replyError) {
+      logger.warn({ replyError }, 'Could not deliver command error reply');
     }
   }
 }

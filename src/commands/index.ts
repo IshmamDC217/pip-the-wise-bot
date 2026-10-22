@@ -1,5 +1,6 @@
 import { REST, Routes, Collection } from 'discord.js';
 import type { Client } from 'discord.js';
+import { pathToFileURL } from 'node:url';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import type { Command } from '../types.js';
@@ -14,6 +15,9 @@ import * as site from './site.js';
 import * as calendar from './calendar.js';
 
 const commandModules: Command[] = [ping, status, stats, products, users, site, calendar];
+
+// Exposed so ready.ts can re-register the same set on boot
+export const commands = commandModules;
 
 export async function loadCommands(client: Client) {
   const commands = new Collection<string, Command>();
@@ -37,8 +41,12 @@ async function registerCommands() {
   logger.info('Commands registered successfully!');
 }
 
-// If run directly (npm run register)
-const isDirectRun = process.argv[1]?.includes('commands/index');
+// If run directly (npm run register). Compared as file URLs because on Windows
+// argv[1] is a backslash path, so a substring check on 'commands/index' never
+// matched and this script silently did nothing.
+const isDirectRun = process.argv[1]
+  ? pathToFileURL(process.argv[1]).href === import.meta.url
+  : false;
 if (isDirectRun) {
   registerCommands().catch((err) => {
     logger.error(err, 'Failed to register commands');

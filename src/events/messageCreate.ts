@@ -6,9 +6,9 @@ import { sheetsService } from '../services/sheets.service.js';
 import { db } from '../services/database.service.js';
 import { addReminder, cancelReminder, getPendingReminders } from '../monitors/reminder.monitor.js';
 import { posService } from '../services/pos.service.js';
+import { posTools } from '../services/pos.tools.js';
 import { buildCalendarConfirmEmbed, buildUpcomingEventsEmbed, buildPendingRemindersEmbed } from '../embeds/calendar.embeds.js';
 import { buildSheetCreatedEmbed } from '../embeds/sheets.embeds.js';
-import { buildSessionStatsEmbed, buildSessionsOverviewEmbed } from '../embeds/pos.embeds.js';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 
@@ -18,21 +18,15 @@ export const once = false;
 // Dedup guard — prevent processing the same message twice
 const processed = new Set<string>();
 
-// Canned failure lines: phrasing an apology does not need a full LLM call,
-// and these stay honest about what actually happened (the POS is on Netlify
-// now, there is no cold start to wait out).
-const POS_FAIL_LINES = [
-  "tried to pull the pos data but the request failed on my end. give it a minute and ask again",
-  "the pos isn't answering me right now. try again shortly and i'll have another crack at it",
-  "couldn't fetch the numbers just now, something's off with the pos connection. retry in a bit",
-];
-
 const pickLine = (lines: string[]) => lines[Math.floor(Math.random() * lines.length)];
 
 const FORGET_PATTERN = /\b(forget|reset|wipe|clear) (the |this |our |your )?(chat|convo|conversation|history|memory)\b/i;
 // Anchored to the end of the message so "pip usage" matches but a passing
 // mention like "the memory usage on the server" does not.
 const USAGE_PATTERN = /\b((token|ai|groq|api)\s+)?(usage|quota)(\s+(report|stats|check))?\s*\??\s*$/i;
+// "pip restart", "restart yourself pip", "pip reboot please". Anchored to the end
+// and no trailing "?" so "should i restart?" is a question, not an order.
+const RESTART_PATTERN = /\b(restart|reboot)\b(\s+(yourself|pip|the bot))?(\s+(please|pls))?\s*[.!]*$/i;
 
 const CANCEL_REMINDER_PATTERN = /\b(cancel|delete|remove|scrap|drop)\b.*\breminders?\b/i;
 
@@ -72,22 +66,6 @@ function reminderDueAt(date: string, time?: string | null): string | null {
   const t = time && /^\d{1,2}:\d{2}$/.test(time) ? time.padStart(5, '0') : '09:00';
   const d = new Date(`${date}T${t}:00`);
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
-}
-
-/** Exact-number stall matching: "stall 1" must never resolve to "Stall 13". */
-function findStallSession<T extends { name: string }>(sessions: T[], content: string): T | null {
-  const numMatch = content.match(/\bstall\s*#?(\d+)\b/i);
-  if (numMatch) {
-    return sessions.find(s => {
-      const sessionNum = s.name.match(/\bstall\s*#?(\d+)\b/i);
-      return sessionNum?.[1] === numMatch[1];
-    }) ?? null;
-  }
-  const nameMatch = content.match(/\bstall\s+([a-z][\w-]*)/i);
-  if (nameMatch && !/^(performance|sales|revenue|report|stats|summary|data|numbers|recap|breakdown|do|did|went|going)$/i.test(nameMatch[1])) {
-    return sessions.find(s => s.name.toLowerCase().includes(nameMatch[1].toLowerCase())) ?? null;
-  }
-  return null;
 }
 
 export async function execute(message: Message) {
@@ -172,6 +150,18 @@ export async function execute(message: Message) {
       return;
     }
 
+    // ── Admin: restart. The process exits cleanly and the Windows service
+    // (NSSM, AppExit=Restart) relaunches it, so a new build goes live without
+    // anyone needing an admin shell on the laptop. ──
+    if (isAdmin && explicitTrigger && RESTART_PATTERN.test(content)) {
+      logger.info({ user: message.author.tag }, 'Restart requested from Discord');
+      await message.reply("brb, restarting. give me about 20 seconds");
+      // Routes through the SIGTERM handler in index.ts: monitors stop, the
+      // Discord client disconnects, then exit(0).
+      setTimeout(() => process.emit('SIGTERM', 'SIGTERM'), 500);
+      return;
+    }
+
     // ── Cancel a reminder (checked before calendar-create so "delete the
     // reminder about X" doesn't get re-extracted as a new reminder) ──
     if (CANCEL_REMINDER_PATTERN.test(content)) {
@@ -191,95 +181,6 @@ export async function execute(message: Message) {
     }
 
     if ('sendTyping' in message.channel) await message.channel.sendTyping();
-
-    // ── Intent: Stock-only (e.g. "what are we out of") ──
-    // Checked before POS/calendar so specific stock questions get fresh stock
-    // data — but never when the message is really a product update ("change the
-    // stock of X to 12") or a reminder ("remind me to restock"), which would
-    // otherwise be hijacked into a read-only stock report.
-    if (
-      posService.isConfigured() &&
-      aiService.hasStockIntent(content) &&
-      !aiService.hasPosIntent(content) &&
-      !aiService.hasProductCrudIntent(content) &&
-      !aiService.hasCalendarIntent(content)
-    ) {
-      logger.info({ content }, 'Stock-only intent detected');
-      try {
-        const stockText = await posService.buildLatestStockSummary();
-        const reply = await aiService.chat(
-          message.channel.id,
-          message.author.displayName,
-          content,
-          { context: `User asked about stock levels. Latest stock figures from the POS:\n${stockText}\nAnswer using these numbers. If the product they asked about isn't listed, say so. Keep it casual and in character.` },
-        );
-        await message.reply(reply);
-        aiService.recordActivity(message.channel.id);
-        return;
-      } catch (err) {
-        logger.error({ err }, 'Stock fetch failed');
-        await message.reply(pickLine(POS_FAIL_LINES));
-        aiService.recordActivity(message.channel.id);
-        return;
-      }
-    }
-
-    // ── Intent: POS / Stall Data ────────────────────
-    if (aiService.hasPosIntent(content) && posService.isConfigured()) {
-      logger.info({ content }, 'POS intent detected');
-
-      try {
-        // Determine if they want a specific session or an overview
-        const wantsOverview = /\b(all (stalls|sessions|events)|session(s)? (list|overview|history)|every (stall|session))\b/i.test(content);
-
-        if (wantsOverview) {
-          const sessions = await posService.getSessions();
-          const summaryText = await posService.buildAllSessionsSummary();
-          const embed = buildSessionsOverviewEmbed(sessions);
-
-          const reply = await aiService.chat(
-            message.channel.id,
-            message.author.displayName,
-            content,
-            { context: `User asked about POS sessions. Data from the POS system:\n${summaryText}\nRespond naturally about the sessions — the embed shows the details. Keep it casual.` },
-          );
-
-          await message.reply({ content: reply, embeds: [embed] });
-        } else {
-          // Try to find a specific session by stall number/name, default to most recent
-          const sessions = await posService.getSessions();
-          const targetSession = findStallSession(sessions, content) ?? sessions[0];
-
-          const summaryText = targetSession
-            ? await posService.buildSessionSummary(targetSession.id)
-            : await posService.buildSessionSummary();
-          // Served from the POS response cache — no second network round trip
-          const latestDetail = targetSession ? await posService.getSession(targetSession.id) : null;
-
-          const embeds = [];
-          if (latestDetail) {
-            embeds.push(buildSessionStatsEmbed(latestDetail));
-          }
-
-          const reply = await aiService.chat(
-            message.channel.id,
-            message.author.displayName,
-            content,
-            { context: `User asked about POS/stall performance. Data from the POS system:\n${summaryText}\nRespond naturally with insights about the numbers — highlight interesting stuff like best sellers and revenue. The embed shows the key stats. Keep it casual and in character.` },
-          );
-
-          await message.reply({ content: reply, embeds });
-        }
-
-        aiService.recordActivity(message.channel.id);
-        return;
-      } catch (err) {
-        logger.error({ err }, 'POS data fetch failed');
-        await message.reply(pickLine(POS_FAIL_LINES));
-        aiService.recordActivity(message.channel.id);
-        return;
-      }
-    }
 
     // ── Intent: Calendar Read ─────────────────────
     if (aiService.hasCalendarReadIntent(content)) {
@@ -318,7 +219,7 @@ export async function execute(message: Message) {
         { context: `User asked about the calendar. Upcoming events: ${eventSummary}.${reminderSummary} Respond naturally about what's coming up, don't list them all — the embeds show details.` },
       );
 
-      await message.reply({ content: reply, embeds });
+      await message.reply({ content: reply.content, embeds });
       return;
     }
 
@@ -551,14 +452,18 @@ export async function execute(message: Message) {
       }
     }
 
-    // ── Default: Chat ─────────────────────────────
+    // ── Default: Chat (with POS lookups on tap) ───
+    // Any question that needs stall, product or stock figures lands here and
+    // the model fetches what it needs, so phrasing doesn't have to match a
+    // keyword list and every number it quotes comes from a real lookup.
     const reply = await aiService.chat(
       message.channel.id,
       message.author.displayName,
       content,
+      { tools: posService.isConfigured() ? posTools : undefined },
     );
 
-    await message.reply(reply);
+    await message.reply({ content: reply.content, embeds: reply.embeds });
   } catch (err) {
     logger.error({ err }, 'Failed to process message');
   }

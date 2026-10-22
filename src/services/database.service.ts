@@ -55,6 +55,12 @@ const PRODUCT_SELECT = `SELECT p.*,
     (SELECT path FROM product_images WHERE product_id = p.id AND is_primary = TRUE LIMIT 1) AS primary_image
   FROM products p`;
 
+// Postgres keeps microseconds; the monitor's checkpoint is a JS Date, which
+// only keeps milliseconds. Comparing raw timestamps against that checkpoint
+// re-matches the newest row forever (12:00:00.123456 > 12:00:00.123), so
+// truncate the column to the same precision before comparing.
+const ms = (column: string) => `date_trunc('milliseconds', ${column})`;
+
 export const db = {
   isConfigured(): boolean {
     return pool !== null;
@@ -63,20 +69,20 @@ export const db = {
   // ── Read ──────────────────────────────────────────
   async getNewUsers(since: Date): Promise<DBUser[]> {
     return query<DBUser>(
-      'SELECT id, username, email, role, email_verified, created_at FROM users WHERE created_at > $1 ORDER BY created_at ASC',
+      `SELECT id, username, email, role, email_verified, created_at FROM users WHERE ${ms('created_at')} > $1 ORDER BY created_at ASC`,
       [since],
     );
   },
 
   async getVerifiedUsers(since: Date): Promise<DBUser[]> {
     return query<DBUser>(
-      'SELECT id, username, email, email_verified_at FROM users WHERE email_verified = TRUE AND email_verified_at > $1 ORDER BY email_verified_at ASC',
+      `SELECT id, username, email, email_verified_at FROM users WHERE email_verified = TRUE AND ${ms('email_verified_at')} > $1 ORDER BY email_verified_at ASC`,
       [since],
     );
   },
 
   async getNewProducts(since: Date): Promise<DBProduct[]> {
-    return query<DBProduct>(`${PRODUCT_SELECT} WHERE p.created_at > $1 ORDER BY p.created_at ASC`, [since]);
+    return query<DBProduct>(`${PRODUCT_SELECT} WHERE ${ms('p.created_at')} > $1 ORDER BY p.created_at ASC`, [since]);
   },
 
   async getAllProducts(): Promise<DBProduct[]> {

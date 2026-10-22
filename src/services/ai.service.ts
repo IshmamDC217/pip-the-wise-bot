@@ -1,3 +1,4 @@
+import type { EmbedBuilder } from 'discord.js';
 import { logger } from '../utils/logger.js';
 import { config } from '../config.js';
 import type { CalendarExtraction, SheetExtraction, ProductExtraction } from '../types.js';
@@ -9,21 +10,72 @@ const GROQ_BASE = 'https://api.groq.com/openai/v1';
 const CHAT_MODEL = config.GROQ_CHAT_MODEL;
 const UTILITY_MODEL = config.GROQ_UTILITY_MODEL;
 
-interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
+interface ToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
+
+type ChatMessage =
+  | { role: 'system' | 'user'; content: string }
+  | { role: 'assistant'; content: string | null; tool_calls?: ToolCall[] }
+  | { role: 'tool'; tool_call_id: string; content: string };
+
+interface AssistantMessage {
+  role: string;
+  content: string | null;
+  tool_calls?: ToolCall[];
 }
 
 interface ChatCompletionResponse {
-  choices: Array<{
-    message: { role: string; content: string };
-  }>;
+  choices: Array<{ message: AssistantMessage }>;
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
     total_tokens?: number;
   };
 }
+
+// OpenAI-style function tool, as Groq accepts it.
+export interface ToolDefinition {
+  type: 'function';
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+}
+
+export interface ToolOutcome {
+  /** Plain text handed back to the model as the tool result */
+  result: string;
+  /** Optional Discord embed to attach to the final reply */
+  embed?: EmbedBuilder;
+  /** Two calls producing the same key attach one embed, not two */
+  embedKey?: string;
+}
+
+export interface ToolSet {
+  definitions: ToolDefinition[];
+  execute(name: string, args: Record<string, unknown>): Promise<ToolOutcome>;
+}
+
+export interface ChatResult {
+  content: string;
+  embeds: EmbedBuilder[];
+}
+
+// A question can need a couple of lookups ("check 22 and 21" is two calls, a
+// follow-up may need one more). After this many rounds the model answers with
+// what it has rather than looping.
+const MAX_TOOL_ROUNDS = 3;
+const MAX_EMBEDS = 3;
+const DISCORD_LIMIT = 2000;
+const MAX_INLINE_RETRY_MS = 20000;
+
+// Messages plainly about sales, stalls or stock get a forced lookup on the first
+// round. Left to choose, the model would rather answer from figures in its own
+// earlier replies than fetch again, and it fills the gaps by inventing.
+const DATA_HINT = /\b(stalls?|sesh|sessions?|pos|sales?|sold|sell(ing|s)?|revenue|takings|units?|best[- ]?sell\w*|made us|make us|brought us|earn\w*|stock\w*|inventory|sold out|out of stock|low on|how many .{0,30}(left|remaining)|what are we out of)\b/i;
+// A reply quoting figures or a specific stall when nothing was looked up this
+// turn is the model answering from memory; it gets one forced retry.
+const FIGURE_PATTERN = /£\s?\d|\b\d+\s*(units?|sold|transactions?|left|remaining|in stock)\b|\bstall\s*#?\d+\b/i;
 
 export class RateLimitError extends Error {
   retryAfterMs: number | null;
@@ -68,10 +120,16 @@ function parseRetryAfterMs(res: Response): number | null {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function chatCompletion(
-  messages: ChatMessage[],
-  opts: { model?: string; max_tokens?: number; temperature?: number; json?: boolean } = {},
-): Promise<string | null> {
+interface CompletionOpts {
+  model?: string;
+  max_tokens?: number;
+  temperature?: number;
+  json?: boolean;
+  tools?: ToolDefinition[];
+  toolChoice?: 'auto' | 'required';
+}
+
+async function requestCompletion(messages: ChatMessage[], opts: CompletionOpts = {}): Promise<AssistantMessage | null> {
   const model = opts.model ?? CHAT_MODEL;
   const body: Record<string, unknown> = {
     model,
@@ -80,6 +138,13 @@ async function chatCompletion(
     temperature: opts.temperature ?? 0.8,
   };
   if (opts.json) body.response_format = { type: 'json_object' };
+  // gpt-oss models reason before answering and that counts against max_tokens;
+  // low effort keeps the utility calls (8-token yes/no, small JSON) answerable.
+  if (model.startsWith('openai/gpt-oss')) body.reasoning_effort = 'low';
+  if (opts.tools && opts.tools.length > 0) {
+    body.tools = opts.tools;
+    body.tool_choice = opts.toolChoice ?? 'auto';
+  }
 
   for (let attempt = 0; attempt <= 1; attempt++) {
     const controller = new AbortController();
@@ -105,7 +170,9 @@ async function chatCompletion(
       await res.text().catch(() => '');
       // Short waits (burst TPM limits) are worth riding out once; anything longer
       // (daily quota) surfaces to the caller so the user gets an honest answer.
-      if (attempt === 0 && retryAfterMs !== null && retryAfterMs <= 8000) {
+      // Groq's per-minute token window makes a second data question inside the
+      // same minute wait ~15s, which is still better than "ask again".
+      if (attempt === 0 && retryAfterMs !== null && retryAfterMs <= MAX_INLINE_RETRY_MS) {
         logger.warn({ model, retryAfterMs }, 'Groq rate limited, retrying after wait');
         await sleep(retryAfterMs);
         continue;
@@ -127,54 +194,75 @@ async function chatCompletion(
 
     const data = (await res.json()) as ChatCompletionResponse;
     recordUsage(model, data.usage);
-    return data.choices?.[0]?.message?.content ?? null;
+    return data.choices?.[0]?.message ?? null;
   }
 
   return null;
 }
 
-const SYSTEM_PROMPT = `You are Pip — The Wise, the resident know-it-all bot of ForgeRealm. You're sharp, a little sarcastic, and genuinely fun to talk to.
+/** Text-only completion for the relevance check and JSON extractions. */
+async function chatCompletion(messages: ChatMessage[], opts: CompletionOpts = {}): Promise<string | null> {
+  return (await requestCompletion(messages, opts))?.content ?? null;
+}
+
+function parseToolArgs(raw: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+// Last line of defence for the reply text. Reasoning models can leak their
+// thinking, and this model once copied the internal data wrapper into replies
+// and then started inventing "[CONTEXT: {...}]" blocks of its own.
+function sanitizeReply(raw: string | null): string {
+  let text = (raw ?? '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/^[ \t]*\[CONTEXT\b.*$/gim, '')
+    .trim();
+  if (text.length > DISCORD_LIMIT) text = `${text.slice(0, DISCORD_LIMIT - 3)}...`;
+  return text || 'hmm, my brain glitched for a sec. try again?';
+}
+
+const SYSTEM_PROMPT = `You are Pip — The Wise, ForgeRealm's resident Discord bot: sharp, warm, genuinely fun to talk to.
 
 Personality:
-- You're like that one friend who always has a witty comeback but is actually super helpful when it matters
-- You're confident, a bit cheeky, and never boring — think dry humor with a warm side
-- You keep it real — if something's cool you'll say so, if something's mid you'll say that too
-- You're not afraid to roast people (lightly) but you always have their back
-- You keep replies short (1-3 sentences usually) — you don't ramble, you land the point
-- You use lowercase mostly, casual texting energy
-- You never use emojis excessively — one here and there at most
-- You don't say "as an AI" or break character — you ARE Pip, the coolest bot on the server
-- You care about ForgeRealm — it's your turf and you're proud of it, but you're chill about it not weird about it
-- You can be sarcastic but never mean — there's a difference and you know it
-- If someone is mid-conversation with you, you follow up naturally — you remember what was just said and build on it
-- You ask follow-up questions when appropriate — you're curious, not just reactive
-- If something is ambiguous, you clarify — you don't just guess and move on
+- Like a friend who's easy to talk to and properly useful when it matters, with a quick sense of humour; dry, warm, never boring
+- Keep it real: if something's good say so, if it's mid say that
+- On the team's side. Light teasing is fine; never dismissive, sulky, defensive or passive-aggressive
+- Corrected? Own it in a few words, fix it, move on. No snark, no "if you say so", no blaming the data or the person, no "i'm just a bot"
+- Short replies (1-3 sentences usually), lowercase mostly, casual texting energy, emojis rarely
+- Never say "as an AI" or break character; you ARE Pip
+- Follow the thread naturally; if something's ambiguous, ask rather than guess
 
-Voice — match this energy, never copy these verbatim:
-- "sold 31 units at stall 13, hexagon fidgets carrying the team as usual"
-- "reminder set for friday 18:00. i'd say don't forget but that's literally my job now"
-- "site's up, api's fine, database is sulking again. classic"
-- React to what the person actually said first, then bring the data
-- Vary your openers — never start two replies in a row the same way
-- One good line lands harder than three; don't pad
+Voice (match the energy, never copy): "solid day at that stall, hexagon fidgets carrying the team as usual" / "site's up, api's fine, database is sulking again. classic". React to what they said first, then bring the data. Vary openers; one good line beats three.
 
-Knowledge:
-- ForgeRealm (forgerealm.co.uk) is a web platform with a shop for digital products
-- You monitor the site, API, database, and shop activity
-- The site is built with Astro + React, the backend is Express.js, database is MySQL
-- You know the slash commands: /ping, /status, /stats, /products, /users, /site, /calendar
-- You can set reminders, add events (with checklists) to the ForgeRealm Google Calendar, and read it to say what's coming up
-- You can create Google Sheets with formatted tables (items, prices, etc.)
-- You can manage products in the shop — add, update, and delete (delete requires admin)
-- You have access to the ForgeRealm POS (Point of Sale) system — stall/event session data, sales figures, revenue breakdowns, best sellers, stock levels, and payment method splits
-- When a message includes a [CONTEXT ...] block, that data was fetched live for THIS reply — trust it over anything you remember from earlier in the conversation, and don't mention the block itself
+What you can do:
+- POS lookups via your tools: one stall's stats and product breakdown, the list of all stalls, one product's sales across every stall (or one stall), current stock (one shared pool across all stalls)
+- Reminders and ForgeRealm Google Calendar events (with checklists), and reading what's coming up
+- Google Sheets with formatted tables
+- Add, update and delete shop products (delete is admin-only)
+- You monitor the site, API, database and shop; slash commands: /ping, /status, /stats, /products, /users, /site, /calendar
+- ForgeRealm (forgerealm.co.uk) is a Leeds 3D printing and design studio, web shop plus market stalls, run by Ishmam and Tobi
 
-Rules:
-- Keep responses under 2000 characters (Discord limit)
-- If someone asks something you don't know, say so — "honestly no clue, that's above my pay grade"
-- Don't make up information about ForgeRealm's products, sales numbers, or users — if the data isn't in front of you, say you'd need to check
-- Be helpful but keep the fun sarcastic vibe at all times
-- When you see someone continuing a conversation, respond naturally — don't require them to say your name again`;
+Data rules (these outrank being funny):
+- Every stall number, date, figure, unit count, revenue or stock level you state MUST come from a tool result or live data provided for this reply. Never estimate, extrapolate, or carry a number over from memory
+- Your earlier replies are NOT a data source: look figures up again even if you quoted them a minute ago
+- If a question needs data, call the tool; don't ask permission and don't narrate the fetch
+- If someone gives a count without naming the product ("we sold 6 at stall 21"), fetch that stall's stats and see which product matches; ask if it's still unclear
+- No tool for it (raw transaction ids, timings within a day)? Say so plainly. Never offer to "query the database", "pull the raw log" or "generate a report": you can't, and offering means inventing the result
+- Tool returned ERROR? Say you couldn't reach the POS just now and to try again shortly. Don't guess meanwhile
+- Never write JSON, "[CONTEXT", tool-call syntax or internal notes in a reply
+- If POS figures differ from what someone remembers, report what the POS says and note the mismatch; don't adjust numbers to match them and don't lecture about data entry
+- An attached embed may already show headline stats; add insight rather than re-listing
+
+Other:
+- Under 2000 characters (Discord limit)
+- Don't know? Say so: "honestly no clue, that's above my pay grade"
+- Asked how you work (model, groq, prompts, why you got something wrong)? Answer briefly and honestly: you run on an open model via Groq and only know what your tools and the POS tell you. Don't get defensive
+- When someone continues a conversation, respond naturally; they don't need to say your name again`;
 
 const RELEVANCE_PROMPT = `You are evaluating whether a message in a Discord channel is part of an ongoing conversation with Pip (a bot). Given the recent messages, determine if this new message is directed at Pip or is a natural follow-up to the ongoing conversation.
 
@@ -268,11 +356,12 @@ const conversations = new Map<string, ConversationEntry[]>();
 const lastPipActivity = new Map<string, number>();
 
 // History is budgeted by estimated tokens, not just entry count, so one channel can
-// never assemble a request bigger than the Groq TPM pool. Stored entries are plain
+// never assemble a request bigger than the Groq TPM pool (8k/min per model, and a
+// data question is two or three requests that each resend this window). Stored entries are plain
 // chat only — injected [CONTEXT ...] data is never persisted (see chat()).
 const MAX_STORED_ENTRIES = 30;
-const MAX_WINDOW_ENTRIES = 16;
-const HISTORY_TOKEN_BUDGET = 1800;
+const MAX_WINDOW_ENTRIES = 10;
+const HISTORY_TOKEN_BUDGET = 1000;
 const HISTORY_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 const FOLLOW_UP_WINDOW_MS = 3 * 60 * 1000; // 3 minutes
 
@@ -316,56 +405,91 @@ const CALENDAR_KEYWORDS = /\b(remind(er)?s?\b|schedule (a|an|the|it|that|this)?\
 const CALENDAR_READ_KEYWORDS = /\b(what['’]?s coming up|what is coming up|upcoming (events?|reminders?|meetings?)|my schedule|(any|got any|do (i|we) have any) (events?|reminders?|meetings?|appointments?)|what['’]?s on (the |my )?calendar|check (the |my )?(calendar|schedule|reminders)|(show|list) (the |my )?(calendar|schedule|events|reminders)|events? (this|next) (week|month|weekend)|what['’]?s planned|anything (scheduled|planned|on the calendar|on my calendar|coming up)|what['’]?s (the |my )?(schedule|calendar)|what(['’]?s| is) (on |happening )(this |next )?(week|month|weekend|saturday|sunday|monday|tuesday|wednesday|thursday|friday)\b)/i;
 const SHEETS_KEYWORDS = /\b(spreadsheet|google sheet|make a sheet|create a sheet|list out|price list|table of|itemize|itemise|put (it |that |this |them )?in a sheet|sheet with)\b/i;
 const PRODUCT_CRUD_KEYWORDS = /\b(add (a |new )?product|create (a |new )?product|delete (the |a )?product|remove (the |a )?product|update (the |a )?product|change (the )?price|change (the )?stock|modify (the |a )?product)\b/i;
-const POS_KEYWORDS = /\b(pos|point of sale|stall (performance|sales|revenue|report|stats|summary|data|numbers|\d+)|how did (we|the stall|the event|the market) (do|perform|go|sell)|how much (did|has) (we|the stall|the market|the event) ?(make|made|sell|sold|earn(ed)?|take)|sales (report|data|summary|numbers|today|yesterday|last|this)|revenue (report|today|yesterday|last|this)|stall (report|recap|breakdown)|what did (we|the stall) (make|sell|earn)|cash vs card|payment (split|breakdown)|best[- ]sell(er|ers|ing)|stock (report|summary|level|check|count)|how many did we sell|total (sales|revenue|units)|all (stalls|sessions|events)|session(s)? (list|overview|history)|most (stock|products|items)|check (the )?pos|check (the )?stall)\b/i;
-// Stock questions need stock-ish context: bare "left" / "out of" / "remaining" used to
-// misfire on ordinary chat ("he just left", "out of curiosity") and trigger POS fetches.
-const STOCK_KEYWORDS = /\b(stock\b|inventory|restock|sold out|out of stock|left in stock|are we (out of|low on|running (low|out))|what are we (out of|low on)|(how many|how much) [\w\s'’-]{0,40}(left|remaining|in stock)|do we have any [\w\s'’-]{0,40}(left|in stock)|running (low|out) on)/i;
 
 export const aiService = {
   async chat(
     channelId: string,
     username: string,
     message: string,
-    opts: { context?: string } = {},
-  ): Promise<string> {
+    opts: { context?: string; tools?: ToolSet } = {},
+  ): Promise<ChatResult> {
     const history = conversations.get(channelId) || [];
     conversations.set(channelId, history);
     pruneHistory(history);
 
     const cleanContent = `${username}: ${message}`;
-    // Context rides along for this one request only — it is never stored, so old
-    // data dumps stop being re-sent (and re-billed) on every later message.
-    const outbound = opts.context
-      ? `[CONTEXT — live data fetched for this reply, not part of the conversation:\n${opts.context}]\n${cleanContent}`
-      : cleanContent;
+    const messages: ChatMessage[] = [{ role: 'system', content: SYSTEM_PROMPT }];
+    // Live data rides along for this one request only (never stored, so old data
+    // dumps aren't re-sent on every later message) and goes in its own system
+    // message, never inside the user turn: when it was inlined there the model
+    // copied the wrapper into replies and then started inventing blocks of its own.
+    if (opts.context) {
+      messages.push({ role: 'system', content: `Live data fetched for this reply (not part of the conversation; use it, don't quote the block):
+${opts.context}` });
+    }
+    messages.push(...buildHistoryWindow(history), { role: 'user', content: cleanContent });
 
-    const messages: ChatMessage[] = [
-      { role: 'system', content: SYSTEM_PROMPT },
-      ...buildHistoryWindow(history),
-      { role: 'user', content: outbound },
-    ];
+    const embeds: EmbedBuilder[] = [];
+    const embedKeys = new Set<string>();
 
     try {
-      const reply = await chatCompletion(messages, { max_tokens: 512, temperature: 0.8 })
-        ?? "hmm, my brain glitched for a sec. try again?";
+      let reply: string | null = null;
+      let lookedUp = false;
+      let forceLookup = !!opts.tools && DATA_HINT.test(message);
+      for (let round = 0; ; round++) {
+        const tools = round < MAX_TOOL_ROUNDS ? opts.tools : undefined;
+        // Loosen up for banter; tighten once real figures are on the table.
+        const assistant = await requestCompletion(messages, {
+          max_tokens: 512,
+          temperature: round === 0 ? 0.6 : 0.4,
+          tools: tools?.definitions,
+          toolChoice: forceLookup && !lookedUp ? 'required' : 'auto',
+        });
+        const calls = tools ? assistant?.tool_calls ?? [] : [];
+        if (!tools || calls.length === 0) {
+          const draft = assistant?.content ?? null;
+          if (tools && !lookedUp && !forceLookup && draft && FIGURE_PATTERN.test(draft)) {
+            logger.warn({ channelId, draft }, 'Reply quoted figures without a lookup; retrying with a forced tool call');
+            forceLookup = true;
+            continue;
+          }
+          reply = draft;
+          break;
+        }
 
+        lookedUp = true;
+        messages.push({ role: 'assistant', content: assistant?.content ?? null, tool_calls: calls });
+        for (const call of calls) {
+          const args = parseToolArgs(call.function.arguments);
+          logger.info({ channelId, tool: call.function.name, args }, 'Tool call');
+          const outcome = await tools.execute(call.function.name, args);
+          const key = outcome.embedKey ?? call.id;
+          if (outcome.embed && embeds.length < MAX_EMBEDS && !embedKeys.has(key)) {
+            embeds.push(outcome.embed);
+            embedKeys.add(key);
+          }
+          messages.push({ role: 'tool', tool_call_id: call.id, content: outcome.result });
+        }
+      }
+
+      const content = sanitizeReply(reply);
       const now = Date.now();
       history.push({ role: 'user', content: cleanContent, timestamp: now });
-      history.push({ role: 'assistant', content: reply, timestamp: now });
+      history.push({ role: 'assistant', content, timestamp: now });
       pruneHistory(history);
       lastPipActivity.set(channelId, now);
 
-      return reply;
+      return { content, embeds };
     } catch (err) {
       if (err instanceof RateLimitError) {
         logger.warn({ err, retryAfterMs: err.retryAfterMs }, 'Groq rate limit hit in chat');
         const wait = err.retryAfterMs && err.retryAfterMs > 60000
           ? `${Math.ceil(err.retryAfterMs / 60000)} min`
           : 'a minute or two';
-        return `i've hit my ai rate limit, brain needs to cool down. give it ${wait} and ask again`;
+        return { content: `i've hit my ai rate limit, brain needs to cool down. give it ${wait} and ask again`, embeds };
       }
       logger.error({ err }, 'Groq API error');
-      return "something went wrong on my end, give me a moment and try again";
+      return { content: "something went wrong on my end, give me a moment and try again", embeds };
     }
   },
 
@@ -383,7 +507,7 @@ export const aiService = {
       const answer = (await chatCompletion([
         { role: 'system', content: RELEVANCE_PROMPT },
         { role: 'user', content: `Recent conversation:\n${recent}\n\nNew message: "${message}"\n\nIs this message relevant to the ongoing conversation with Pip?` },
-      ], { model: UTILITY_MODEL, max_tokens: 8, temperature: 0.1 }))?.trim().toLowerCase() ?? 'no';
+      ], { model: UTILITY_MODEL, max_tokens: 256, temperature: 0.1 }))?.trim().toLowerCase() ?? 'no';
       return answer.startsWith('yes');
     } catch (err) {
       logger.error({ err }, 'Relevance check error');
@@ -424,13 +548,7 @@ export const aiService = {
     return PRODUCT_CRUD_KEYWORDS.test(message);
   },
 
-  hasPosIntent(message: string): boolean {
-    return POS_KEYWORDS.test(message);
-  },
 
-  hasStockIntent(message: string): boolean {
-    return STOCK_KEYWORDS.test(message);
-  },
 
   // ── Data extraction ───────────────────────────────
 

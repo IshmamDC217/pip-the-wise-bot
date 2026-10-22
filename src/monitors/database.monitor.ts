@@ -41,8 +41,10 @@ async function poll(client: Client) {
     const conn = await db.checkConnection();
     if (!conn.ok) {
       if (!dbUnavailableLogged) {
-        if (conn.code === 'ER_ACCESS_DENIED_ERROR') {
-          logger.error({ code: conn.code }, 'Database credentials REJECTED — check DB_USER/DB_PASS in .env (the server is reachable, the login is wrong)');
+        if (conn.code === 'NOT_CONFIGURED') {
+          logger.warn('DATABASE_URL not set — website database monitor is off');
+        } else if (conn.code === '28P01' || conn.code === '28000') {
+          logger.error({ code: conn.code }, 'Database credentials REJECTED — check DATABASE_URL in .env (the server is reachable, the login is wrong)');
         } else {
           logger.warn({ code: conn.code, message: conn.message }, 'Database unreachable — monitor paused until connection is restored');
         }

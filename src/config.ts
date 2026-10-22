@@ -31,12 +31,10 @@ export const config = {
   POS_USERNAME: optional('POS_USERNAME', ''),
   POS_PASSWORD: optional('POS_PASSWORD', ''),
 
-  // MySQL
-  DB_HOST: optional('DB_HOST', 'localhost'),
-  DB_PORT: parseInt(optional('DB_PORT', '3306')),
-  DB_USER: optional('DB_USER', 'root'),
-  DB_PASS: optional('DB_PASS', ''),
-  DB_NAME: optional('DB_NAME', 'forgerealm'),
+  // Website database (Neon Postgres). Same DATABASE_URL the site backend uses.
+  // Deliberately no host/user/password fallback: the old DB_* vars point at
+  // the retired RDS instance, and a fallback would quietly connect to nothing.
+  DATABASE_URL: optional('DATABASE_URL', ''),
 
   // Groq
   GROQ_API_KEY: required('GROQ_API_KEY'),

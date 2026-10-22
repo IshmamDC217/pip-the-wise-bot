@@ -1,28 +1,10 @@
 /**
  * ForgeRealm Monitor MCP Tools — website health, API health, DB queries
  */
-import mysql from 'mysql2/promise';
+import { db } from '../../services/database.service.js';
 
 const SITE_URL = process.env.FORGEREALM_SITE_URL || 'https://forgerealm.co.uk';
 const API_URL = process.env.FORGEREALM_API_URL || 'https://api.forgerealm.co.uk';
-
-function getPool() {
-  return mysql.createPool({
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || '3306'),
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASS || '',
-    database: process.env.DB_NAME || 'forgerealm',
-    connectionLimit: 2,
-    connectTimeout: 10000,
-  });
-}
-
-let pool: mysql.Pool | null = null;
-function db() {
-  if (!pool) pool = getPool();
-  return pool;
-}
 
 async function httpCheck(url: string): Promise<{ ok: boolean; status: number; latency: number }> {
   const start = Date.now();
@@ -52,10 +34,7 @@ export const monitorTools = {
 
   async shopStats() {
     try {
-      const [userCount] = await db().query('SELECT COUNT(*) as count FROM users');
-      const [productCount] = await db().query('SELECT COUNT(*) as count FROM products');
-      const users = (userCount as any[])[0].count;
-      const products = (productCount as any[])[0].count;
+      const [users, products] = await Promise.all([db.getUserCount(), db.getProductCount()]);
 
       return {
         content: [{
@@ -70,12 +49,7 @@ export const monitorTools = {
 
   async recentUsers({ limit }: { limit: number }) {
     try {
-      const [rows] = await db().query(
-        'SELECT username, email, role, created_at FROM users ORDER BY created_at DESC LIMIT ?',
-        [limit],
-      );
-
-      const users = rows as any[];
+      const users = await db.getRecentUsers(limit);
       if (users.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No users found.' }] };
       }
@@ -96,11 +70,7 @@ export const monitorTools = {
 
   async listProducts() {
     try {
-      const [rows] = await db().query(
-        'SELECT name, description, price, stock FROM products ORDER BY name',
-      );
-
-      const products = rows as any[];
+      const products = [...(await db.getAllProducts())].sort((a, b) => a.name.localeCompare(b.name));
       if (products.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No products in the shop.' }] };
       }

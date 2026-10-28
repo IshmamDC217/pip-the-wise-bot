@@ -20,6 +20,25 @@ const processed = new Set<string>();
 
 const pickLine = (lines: string[]) => lines[Math.floor(Math.random() * lines.length)];
 
+/**
+ * Keep "Pip is typing..." alive while a slow reply is built. POS lookups take a
+ * few seconds and a Groq per-minute token wait can take up to a minute; without
+ * this the channel just looks ignored. Discord's indicator lasts ~10s per call.
+ */
+async function withTyping<T>(message: Message, work: () => Promise<T>): Promise<T> {
+  const channel = message.channel;
+  const ping = () => {
+    if ('sendTyping' in channel) channel.sendTyping().catch(() => {});
+  };
+  ping();
+  const timer = setInterval(ping, 8000);
+  try {
+    return await work();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 const FORGET_PATTERN = /\b(forget|reset|wipe|clear) (the |this |our |your )?(chat|convo|conversation|history|memory)\b/i;
 // Anchored to the end of the message so "pip usage" matches but a passing
 // mention like "the memory usage on the server" does not.
@@ -212,12 +231,12 @@ export async function execute(message: Message) {
         ? ` Pending reminders: ${pending.slice(0, 5).map(r => r.message).join(', ')}.`
         : '';
 
-      const reply = await aiService.chat(
+      const reply = await withTyping(message, () => aiService.chat(
         message.channel.id,
         message.author.displayName,
         content,
         { context: `User asked about the calendar. Upcoming events: ${eventSummary}.${reminderSummary} Respond naturally about what's coming up, don't list them all — the embeds show details.` },
-      );
+      ));
 
       await message.reply({ content: reply.content, embeds });
       return;
@@ -456,12 +475,12 @@ export async function execute(message: Message) {
     // Any question that needs stall, product or stock figures lands here and
     // the model fetches what it needs, so phrasing doesn't have to match a
     // keyword list and every number it quotes comes from a real lookup.
-    const reply = await aiService.chat(
+    const reply = await withTyping(message, () => aiService.chat(
       message.channel.id,
       message.author.displayName,
       content,
       { tools: posService.isConfigured() ? posTools : undefined },
-    );
+    ));
 
     await message.reply({ content: reply.content, embeds: reply.embeds });
   } catch (err) {

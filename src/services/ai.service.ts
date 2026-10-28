@@ -67,7 +67,13 @@ export interface ChatResult {
 const MAX_TOOL_ROUNDS = 3;
 const MAX_EMBEDS = 3;
 const DISCORD_LIMIT = 2000;
-const MAX_INLINE_RETRY_MS = 20000;
+// Groq's free tier is 8k tokens/min per model, and a multi-product question
+// re-sends the whole turn on every tool round, so one question can use the
+// minute up by itself (Tobi's four-product question did: 1.6k + 2.7k + 3.9k,
+// then a 35s retry-after). Waiting out the window is better than failing, and
+// the typing indicator keeps Discord from looking dead meanwhile.
+const MAX_INLINE_RETRY_MS = 65000;
+const MAX_RATE_LIMIT_WAITS = 2;
 
 // Messages plainly about sales, stalls or stock get a forced lookup on the first
 // round. Left to choose, the model would rather answer from figures in its own
@@ -146,7 +152,7 @@ async function requestCompletion(messages: ChatMessage[], opts: CompletionOpts =
     body.tool_choice = opts.toolChoice ?? 'auto';
   }
 
-  for (let attempt = 0; attempt <= 1; attempt++) {
+  for (let attempt = 0; attempt <= MAX_RATE_LIMIT_WAITS; attempt++) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000);
 
@@ -168,11 +174,9 @@ async function requestCompletion(messages: ChatMessage[], opts: CompletionOpts =
     if (res.status === 429) {
       const retryAfterMs = parseRetryAfterMs(res);
       await res.text().catch(() => '');
-      // Short waits (burst TPM limits) are worth riding out once; anything longer
+      // Per-minute token waits are ridden out (up to twice); anything longer
       // (daily quota) surfaces to the caller so the user gets an honest answer.
-      // Groq's per-minute token window makes a second data question inside the
-      // same minute wait ~15s, which is still better than "ask again".
-      if (attempt === 0 && retryAfterMs !== null && retryAfterMs <= MAX_INLINE_RETRY_MS) {
+      if (attempt < MAX_RATE_LIMIT_WAITS && retryAfterMs !== null && retryAfterMs <= MAX_INLINE_RETRY_MS) {
         logger.warn({ model, retryAfterMs }, 'Groq rate limited, retrying after wait');
         await sleep(retryAfterMs);
         continue;
@@ -251,6 +255,7 @@ Data rules (these outrank being funny):
 - Every stall number, date, figure, unit count, revenue or stock level you state MUST come from a tool result or live data provided for this reply. Never estimate, extrapolate, or carry a number over from memory
 - Your earlier replies are NOT a data source: look figures up again even if you quoted them a minute ago
 - If a question needs data, call the tool; don't ask permission and don't narrate the fetch
+- Need several things? Request them all at once (multiple tool calls in one go). Never repeat a lookup you already made this turn; if a product isn't found, say so and pick from the names the tool returned rather than retrying spellings
 - If someone gives a count without naming the product ("we sold 6 at stall 21"), fetch that stall's stats and see which product matches; ask if it's still unclear
 - No tool for it (raw transaction ids, timings within a day)? Say so plainly. Never offer to "query the database", "pull the raw log" or "generate a report": you can't, and offering means inventing the result
 - Tool returned ERROR? Say you couldn't reach the POS just now and to try again shortly. Don't guess meanwhile
@@ -431,6 +436,8 @@ ${opts.context}` });
 
     const embeds: EmbedBuilder[] = [];
     const embedKeys = new Set<string>();
+    // Lookups already made this turn, by tool + arguments.
+    const fetched = new Set<string>();
 
     try {
       let reply: string | null = null;
@@ -461,6 +468,16 @@ ${opts.context}` });
         messages.push({ role: 'assistant', content: assistant?.content ?? null, tool_calls: calls });
         for (const call of calls) {
           const args = parseToolArgs(call.function.arguments);
+          // A repeated lookup gets a pointer instead of the full result again: the
+          // model has already seen it, and every token in a tool result is re-sent
+          // on each later round of this turn.
+          const dedupeKey = `${call.function.name}:${JSON.stringify(args)}`;
+          if (fetched.has(dedupeKey)) {
+            logger.info({ channelId, tool: call.function.name, args }, 'Tool call repeated this turn; pointing at the earlier result');
+            messages.push({ role: 'tool', tool_call_id: call.id, content: 'Already fetched this turn. Use the earlier result above; do not request it again.' });
+            continue;
+          }
+          fetched.add(dedupeKey);
           logger.info({ channelId, tool: call.function.name, args }, 'Tool call');
           const outcome = await tools.execute(call.function.name, args);
           const key = outcome.embedKey ?? call.id;

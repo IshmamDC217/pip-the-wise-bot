@@ -382,16 +382,20 @@ export const posService = {
       const names = [...matchedProducts.keys()];
       const lines = [`Sales of ${names.map(n => `"${n}"`).join(' + ')} ${scope}:`];
 
-      const sold = perSession.filter(p => p.units > 0);
-      for (const { session, units, revenue } of sold) {
+      // Top stalls only: a multi-product question fans out into several of these
+      // and each is re-sent to the model on every later tool round, so the full
+      // per-stall list (20+ lines each) was eating the per-minute token budget.
+      const sold = perSession.filter(p => p.units > 0).sort((a, b) => b.units - a.units);
+      const TOP_STALLS = 5;
+      if (sold.length > 1) lines.push(`  Best stalls for it (by units):`);
+      for (const { session, units, revenue } of sold.slice(0, TOP_STALLS)) {
         lines.push(`  - ${describeSession(session)}: ${units} units, ${money(revenue)}`);
       }
-      const none = perSession.filter(p => p.units === 0).map(p => p.session.name);
-      if (none.length > 0) lines.push(`  - no sales of it at: ${none.join(', ')}`);
+      if (sold.length > TOP_STALLS) lines.push(`  - ...and ${sold.length - TOP_STALLS} more stalls with smaller sales of it`);
 
       const totalUnits = sold.reduce((s, p) => s + p.units, 0);
       const totalRevenue = sold.reduce((s, p) => s + p.revenue, 0);
-      lines.push('', `TOTAL: ${totalUnits} units, ${money(totalRevenue)} (sold at ${sold.length} of ${targets.length} stalls)`);
+      lines.push('', `TOTAL: ${totalUnits} units, ${money(totalRevenue)} (sold at ${sold.length} of ${targets.length} stalls; none at the other ${targets.length - sold.length})`);
 
       if (names.length > 1) {
         lines.push(`Note: "${productQuery}" matched ${names.length} products and the figures above combine them. Per product: ${names.map(n => {
